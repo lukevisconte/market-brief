@@ -1,17 +1,29 @@
 """
-Trading day brief — pulls quotes + news, asks Claude to write a briefing,
-and emails it through Gmail SMTP.
+Trading Day Market Brief
+
+Pulls:
+- U.S. market indices
+- Watchlist stock prices
+- Global macro data
+- Currencies
+- Commodities
+- Market news
+
+Claude turns the information into an easy-to-understand
+institutional-style market briefing and sends it through Gmail.
 
 Required environment variables:
-  FINNHUB_API_KEY
-  ANTHROPIC_API_KEY
-  EMAIL_TO
-  GMAIL_ADDRESS
-  GMAIL_APP_PASSWORD
+
+FINNHUB_API_KEY
+ANTHROPIC_API_KEY
+EMAIL_TO
+GMAIL_ADDRESS
+GMAIL_APP_PASSWORD
 
 Usage:
-  python main.py premarket
-  python main.py close
+
+python main.py premarket
+python main.py close
 """
 
 import os
@@ -24,7 +36,7 @@ import requests
 
 
 # ============================================================
-# MARKET INDICES
+# U.S. MARKET INDICES
 # ============================================================
 
 INDEX_SYMS = [
@@ -40,45 +52,36 @@ INDEX_SYMS = [
 # ============================================================
 
 WATCHLIST = {
-    "AAPL": "Apple Inc.",
-    "AMZN": "Amazon.com Inc.",
-    "AXP": "American Express Co.",
-    "AVGO": "Broadcom Inc.",
-    "CAT": "Caterpillar Inc.",
-    "KO": "Coca-Cola Co.",
-    "CEG": "Constellation Energy Corp.",
-    "CRWD": "CrowdStrike Holdings Inc.",
-    "LLY": "Eli Lilly and Co.",
-    "XOM": "Exxon Mobil Corp.",
+    "AAPL": "Apple",
+    "AMZN": "Amazon",
+    "AXP": "American Express",
+    "AVGO": "Broadcom",
+    "CAT": "Caterpillar",
+    "KO": "Coca-Cola",
+    "CEG": "Constellation Energy",
+    "CRWD": "CrowdStrike",
+    "LLY": "Eli Lilly",
+    "XOM": "Exxon Mobil",
     "GE": "GE Aerospace",
-    "GOOGL": "Alphabet Inc.",
-    "ISRG": "Intuitive Surgical Inc.",
-    "MSFT": "Microsoft Corp.",
-    "NU": "Nu Holdings Ltd.",
-    "NVDA": "NVIDIA Corp.",
-    "PLTR": "Palantir Technologies Inc.",
-    "TSLA": "Tesla Inc.",
-    "TSM": "Taiwan Semiconductor Manufacturing Co.",
-    "COST": "Costco Wholesale Corp.",
-    "V": "Visa Inc.",
+    "GOOGL": "Alphabet",
+    "ISRG": "Intuitive Surgical",
+    "MSFT": "Microsoft",
+    "NU": "Nu Holdings",
+    "NVDA": "NVIDIA",
+    "PLTR": "Palantir",
+    "TSLA": "Tesla",
+    "TSM": "Taiwan Semiconductor",
+    "COST": "Costco",
+    "V": "Visa",
 }
 
 
-# ============================================================
-# WATCHLIST HELPER
-# ============================================================
-
 def get_watchlist():
-    """
-    Returns the hard-coded watchlist above.
-
-    WATCHLIST can still optionally be overridden through a GitHub
-    Actions environment variable if desired.
-    """
 
     raw = os.environ.get("WATCHLIST", "")
 
     if raw.strip():
+
         return [
             s.strip().upper()
             for s in raw.split(",")
@@ -121,7 +124,7 @@ def fetch_quote(symbol, key):
 # FINNHUB NEWS
 # ============================================================
 
-def fetch_news(key, limit=15):
+def fetch_news(key, limit=20):
 
     url = (
         f"https://finnhub.io/api/v1/news"
@@ -148,7 +151,7 @@ def fetch_news(key, limit=15):
 
 
 # ============================================================
-# FORMAT QUOTES
+# FORMAT QUOTE
 # ============================================================
 
 def fmt(q):
@@ -156,17 +159,15 @@ def fmt(q):
     price = q["price"]
     chg = q["change_pct"]
 
-    price_s = (
-        f"${price:.2f}"
-        if price is not None
-        else "—"
-    )
+    if price is None:
+        price_s = "N/A"
+    else:
+        price_s = f"${price:.2f}"
 
-    chg_s = (
-        f"{chg:+.2f}%"
-        if chg is not None
-        else ""
-    )
+    if chg is None:
+        chg_s = "N/A"
+    else:
+        chg_s = f"{chg:+.2f}%"
 
     return (
         f"{q['symbol']}: "
@@ -176,7 +177,7 @@ def fmt(q):
 
 
 # ============================================================
-# BUILD CLAUDE PROMPT
+# BUILD PROMPT
 # ============================================================
 
 def build_prompt(
@@ -186,61 +187,68 @@ def build_prompt(
     news
 ):
 
-    mode_label = (
-        "PREMARKET, before the U.S. market opens"
-        if mode == "premarket"
-        else "AFTER THE CLOSE of the U.S. market today"
-    )
-
     if mode == "premarket":
+
+        mode_label = (
+            "PREMARKET — before the U.S. market opens"
+        )
 
         final_section = """
 4. SUGGESTED MOVES
 
-End with 2-4 concrete things an investor could consider watching,
-doing, or positioning around today.
+End with 3-5 practical things an investor could consider
+watching or positioning around today.
 
-Think in terms of:
-- sectors
-- individual stocks
-- catalysts
-- macro risks
-- risk/reward
-- potential hedges
-- areas where capital may be rotating
+These should be ideas, not guarantees.
 
-Do not present anything as a guaranteed outcome.
+For each suggested move, briefly explain WHY it makes sense.
 
-If discussing hedge funds, institutional investors, or asset managers,
-ONLY make claims supported by the supplied news or market data.
+Examples:
 
-Never invent institutional positions, fund flows, options positioning,
+- A sector worth watching
+- A stock worth researching
+- A macro risk worth hedging
+- A catalyst worth waiting for
+- A market signal that would confirm or invalidate a thesis
+
+When discussing hedge funds, institutional investors, or asset managers,
+ONLY mention their behavior if the supplied information provides actual
+evidence.
+
+Never invent fund positions, institutional flows, options positioning,
 or "smart money" activity.
 """
 
     else:
 
-        final_section = """
-4. SUGGESTED MOVES
+        mode_label = (
+            "MARKET CLOSE — after the U.S. market has finished trading"
+        )
 
-End with 2-4 concrete things an investor could consider going into
-the next trading session.
+        final_section = """
+4. SUGGESTED MOVES FOR TOMORROW
+
+End with 3-5 practical things an investor could consider
+watching or positioning around for the next session.
+
+Explain WHY each idea matters.
 
 Focus on:
+
 - what worked today
 - what failed
-- sectors gaining or losing leadership
+- sectors gaining leadership
+- sectors losing leadership
 - individual stocks worth researching
-- macro risks
 - upcoming catalysts
-- potential opportunities or hedges
+- macro risks
+- potential hedges
 
-Do not present anything as a guaranteed outcome.
+When discussing hedge funds, institutional investors, or asset managers,
+ONLY mention their behavior if the supplied information provides actual
+evidence.
 
-If discussing hedge funds, institutional investors, or asset managers,
-ONLY make claims supported by the supplied news or market data.
-
-Never invent institutional positions, fund flows, options positioning,
+Never invent fund positions, institutional flows, options positioning,
 or "smart money" activity.
 """
 
@@ -260,194 +268,351 @@ or "smart money" activity.
     )
 
     return f"""
-You are my personal institutional-market research analyst.
+You are my personal market and macro research analyst.
 
-You are writing a concise but intellectually useful {mode_label} market
-briefing for an investor who researches individual stocks but wants help
-understanding the broader market and macro environment.
+This is a {mode_label} briefing.
 
-Do NOT simply summarize headlines.
+I am an investor who researches individual companies and wants
+to understand BOTH individual stocks and the macro environment
+driving the market.
+
+Your job is NOT to simply summarize the news.
 
 Your job is to explain:
 
-WHAT IS HAPPENING?
+1. WHAT IS HAPPENING?
+2. WHY IS IT HAPPENING?
+3. WHY DOES IT MATTER?
+4. WHAT SHOULD I WATCH OR CONSIDER DOING?
 
-WHY DOES IT MATTER?
+Use plain English.
 
-WHAT SHOULD AN INVESTOR WATCH?
+Assume I understand basic investing and financial statements,
+but I do NOT want unnecessary Wall Street jargon.
 
-Use only the market data and news provided below.
+If you use a technical term, explain it briefly.
 
-Do not invent facts, catalysts, institutional activity, or explanations
-for price movements.
+For example:
 
-If the evidence is insufficient, say so.
+Instead of:
+
+"Real yields are creating duration pressure."
+
+Say:
+
+"Higher real yields are putting pressure on growth stocks because
+investors can earn more from relatively safe bonds, making distant
+future earnings less valuable today."
+
+That is the style I want.
 
 ============================================================
 1. WHAT MATTERS TODAY
 ============================================================
 
-Start with the major U.S. indices:
+Start with:
 
-- Dow Jones
+- Dow
 - S&P 500
 - Nasdaq
 - Russell 2000
 
 Explain:
 
-- Which indices are leading or lagging.
-- Whether the market is risk-on, risk-off, defensive, or rotational.
-- Whether market leadership is broadening or narrowing.
-- Whether large caps or smaller companies are showing stronger momentum.
-- What the index performance suggests about investor positioning.
+- Which index is leading
+- Which is lagging
+- Whether investors appear comfortable taking risk
+- Whether money is moving toward growth or value
+- Whether large companies are outperforming smaller companies
+- Whether the market rally appears broad or concentrated
 
-Then examine the watchlist.
+Explain the WHY.
 
-Identify the 3-6 watchlist companies that are MOST IMPORTANT today.
+For example:
 
-Prioritize companies with:
+If Nasdaq is outperforming:
+
+Explain whether that could be related to falling yields,
+AI optimism, earnings expectations, technology news, etc.
+
+If the Dow is outperforming:
+
+Explain whether that suggests investors are favoring more
+defensive or economically sensitive companies.
+
+If small caps are outperforming:
+
+Explain whether that could indicate investors expect stronger
+economic growth or easier financial conditions.
+
+Do NOT automatically assume the reason.
+
+Only make conclusions supported by the data and news.
+
+============================================================
+2. LARGE-CAP STOCKS TO WATCH
+============================================================
+
+Analyze the watchlist below.
+
+Do NOT discuss all 21 companies.
+
+Choose approximately 5-7 companies that matter most TODAY.
+
+Prioritize:
 
 - major news
 - earnings
 - guidance
 - analyst actions
+- major product announcements
 - regulatory developments
-- product announcements
-- unusual price movement
-- major sector influence
-- important macro exposure
-- significant upcoming catalysts
+- unusual price moves
+- sector importance
+- upcoming catalysts
+- macro sensitivity
 
-Do NOT force commentary on every stock.
+Pay particular attention to companies that can move entire sectors.
 
-For stocks without meaningful developments, simply ignore them.
+Examples:
 
-Pay particular attention to mega-cap stocks because moves in companies such
-as Apple, Microsoft, Amazon, Alphabet, NVIDIA, Tesla, Broadcom, and others
-can materially influence the broader market.
+NVDA / AVGO / TSM
+→ AI infrastructure and semiconductor spending
 
-Also identify 1-3 smaller or less obvious names on the watchlist that could
-be particularly interesting even if they are not driving the major indices.
+MSFT / GOOGL / AMZN
+→ cloud, AI, advertising, enterprise spending
+
+AAPL
+→ consumer demand and mega-cap technology
+
+AXP / V
+→ consumer spending and financial conditions
+
+CAT / GE
+→ industrial activity and economic growth
+
+XOM
+→ oil prices and energy demand
+
+LLY
+→ healthcare / obesity-drug trends
+
+COST / KO
+→ consumer spending and defensive behavior
+
+TSLA
+→ EV demand, rates, China, and risk appetite
+
+PLTR / CRWD
+→ software, AI, cybersecurity, and growth-stock valuation
+
+CEG
+→ electricity demand, power prices, nuclear energy, and AI
+data-center demand
+
+NU
+→ emerging-market growth, Latin America, and financial conditions
+
+ISRG
+→ healthcare spending and elective procedures
+
+Do not blindly use these relationships.
+
+Use them as context when the day's data actually supports them.
 
 ============================================================
-2. GLOBAL MACRO
+3. MACRO ENVIRONMENT
 ============================================================
 
-Explain the global macro developments that actually matter today.
+This section is extremely important.
 
-Consider, when relevant:
+Explain the major macro forces affecting the market.
 
-- U.S. dollar strength or weakness
-- USD/JPY
-- EUR/USD
-- GBP/USD
-- Chinese yuan
-- Japanese markets
-- European markets
-- Chinese/Hong Kong markets
-- emerging markets
+Cover the areas that matter today:
+
+INTEREST RATES
+
+Explain:
+
 - Treasury yields
-- global bond markets
-- oil
-- gold
-- natural gas
-- Federal Reserve policy
-- Bank of Japan
-- ECB
-- Bank of England
-- inflation
-- economic data
-- geopolitical developments
-- tariffs and trade policy
+- Fed expectations
+- inflation expectations
+- rate cuts or hikes
+- what this means for stocks
 
-Do NOT mechanically list every currency or foreign market.
-
-Focus on the developments that could actually affect U.S. equities.
-
-Explain the CONNECTION between global markets and the U.S. market.
+Explain WHY rates matter.
 
 For example:
 
-- Is dollar strength creating pressure on multinational companies?
-- Is yen weakness signaling stronger risk appetite or carry-trade behavior?
-- Are Japanese or European markets confirming the U.S. move?
-- Are Treasury yields putting pressure on growth-stock valuations?
-- Is oil signaling inflation or growth concerns?
-- Are global investors moving toward or away from risk?
+"Higher yields make bonds more attractive relative to stocks
+and also reduce the present value of future corporate earnings,
+which tends to hurt expensive growth companies more."
+
+CURRENCY
+
+Discuss:
+
+- U.S. dollar
+- USD/JPY
+- EUR/USD
+- GBP/USD
+- Chinese yuan when relevant
+
+Explain what the currency movement means.
+
+For example:
+
+"A stronger dollar can be a headwind for multinational companies
+because overseas revenue is worth less when converted back into dollars."
+
+Also explain when currency moves may signal:
+
+- risk appetite
+- global capital flows
+- interest-rate differences
+- carry trades
+- economic expectations
+
+GLOBAL MARKETS
+
+Discuss when relevant:
+
+- Japan
+- Nikkei
+- China
+- Hong Kong
+- Europe
+- emerging markets
+
+Explain whether foreign markets are:
+
+- confirming
+- contradicting
+- leading
+- lagging
+
+the U.S. market.
+
+COMMODITIES
+
+Discuss:
+
+- oil
+- gold
+- natural gas
+- other important commodities
+
+Explain the investment connection.
+
+For example:
+
+"Rising oil prices can help Exxon but hurt airlines and increase
+inflation pressure."
+
+Or:
+
+"Gold rising while equities fall can signal investors are seeking
+a defensive asset."
+
+Do not make the example into a conclusion unless today's data supports it.
 
 ============================================================
-3. INVESTOR TAKEAWAY
+4. MACRO → STOCK CONNECTIONS
 ============================================================
 
-Give 3-5 important conclusions.
+This section is specifically designed to help me understand
+how macro factors affect the companies I follow.
+
+Identify the 3-5 most important macro-to-stock connections.
+
+Examples:
+
+Higher yields
+→ pressure on NVDA / PLTR / CRWD valuations
+
+Stronger oil
+→ positive for XOM
+
+Stronger consumer spending
+→ positive for AXP / V / COST
+
+Weakening consumer spending
+→ negative for AXP / COST / KO
+
+Higher AI spending
+→ positive for NVDA / AVGO / TSM / MSFT
+
+Stronger dollar
+→ potential headwind for multinational companies
+
+Japanese yen movement
+→ potential signal for global risk appetite
+
+Again, these are examples.
+
+Use the actual market data and news to determine
+which relationships matter today.
+
+============================================================
+5. INVESTOR TAKEAWAY
+============================================================
+
+Give me 3-5 conclusions.
 
 Answer:
 
-"What should an equity investor actually understand about the market
-right now?"
+"If I only had two minutes to understand today's market,
+what would I need to know?"
 
 Prioritize:
 
 - market leadership
+- macro direction
+- rates
+- currencies
+- global markets
 - sector rotation
-- risk appetite
-- valuation pressure
-- macro risks
-- upcoming catalysts
-- opportunities
+- important individual stocks
+- major catalysts
 - major risks
 
-Do not give generic commentary.
+Use plain English.
 
 ============================================================
-4. SUGGESTED MOVES
+6. SUGGESTED MOVES
 ============================================================
 
 {final_section}
 
 ============================================================
-STYLE
+IMPORTANT RULES
 ============================================================
 
-Write like a sharp institutional morning market note.
+Do not invent information.
 
-Be:
+Do not invent reasons for stock movements.
 
-- analytical
-- direct
-- concise
-- skeptical
-- evidence-driven
+Do not invent institutional activity.
 
-Do not use generic financial clichés.
+Do not claim hedge funds are buying or selling something unless
+the supplied news explicitly provides evidence.
 
-Do not say "markets remain volatile" unless you explain exactly why.
+Do not claim "smart money" is doing something without evidence.
+
+Do not make generic statements.
 
 Do not simply repeat headlines.
 
-Never quote headlines verbatim.
+Paraphrase headlines.
 
-Paraphrase everything.
+Use numbers whenever they are available.
 
-Do not make up explanations for why a stock moved.
+Explain WHY something matters.
 
-If the available data does not explain a move, say that.
+Think like an equity research analyst explaining the market
+to an intelligent investor.
 
-When discussing what hedge funds, institutional investors, or large
-asset managers are doing, only discuss it when the supplied news provides
-actual evidence.
-
-Never fabricate:
-
-- hedge fund positions
-- institutional buying/selling
-- fund flows
-- options positioning
-- insider activity
-- "smart money" activity
-
-Keep the entire briefing under 600 words.
+Keep the entire briefing under 750 words.
 
 ============================================================
 U.S. MARKET DATA
@@ -456,7 +621,7 @@ U.S. MARKET DATA
 {index_lines}
 
 ============================================================
-WATCHLIST
+WATCHLIST DATA
 ============================================================
 
 {watch_lines}
@@ -484,7 +649,7 @@ def call_claude(prompt, api_key):
         },
         json={
             "model": "claude-sonnet-5",
-            "max_tokens": 1500,
+            "max_tokens": 1800,
             "messages": [
                 {
                     "role": "user",
@@ -502,6 +667,7 @@ def call_claude(prompt, api_key):
     for block in data.get("content", []):
 
         if block.get("type") == "text":
+
             return block["text"]
 
     return "No response generated."
@@ -615,7 +781,7 @@ def main():
 
     print(
         f"Tracking {len(watchlist)} "
-        f"watchlist companies."
+        f"stocks."
     )
 
     # --------------------------------------------------------
@@ -664,17 +830,17 @@ def main():
     # GET NEWS
     # --------------------------------------------------------
 
-    news = []
-
     print(
         "Fetching market news..."
     )
+
+    news = []
 
     try:
 
         news = fetch_news(
             finnhub_key,
-            limit=15
+            limit=20
         )
 
     except Exception as e:
@@ -684,7 +850,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # PREPARE DATA
+    # PREPARE QUOTES
     # --------------------------------------------------------
 
     index_quotes = [
@@ -700,6 +866,10 @@ def main():
     # --------------------------------------------------------
     # BUILD PROMPT
     # --------------------------------------------------------
+
+    print(
+        "Building market analysis..."
+    )
 
     prompt = build_prompt(
         mode,
@@ -754,7 +924,7 @@ def main():
     print("")
 
     # --------------------------------------------------------
-    # EMAIL
+    # SEND EMAIL
     # --------------------------------------------------------
 
     send_email(

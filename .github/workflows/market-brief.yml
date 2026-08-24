@@ -1,49 +1,63 @@
-name: Trading day brief
+name: Market Brief
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "premarket or close"
+        description: "Brief type"
         required: true
         default: "premarket"
+        type: choice
+        options:
+          - premarket
+          - close
+
   schedule:
-    # Times are UTC. ET is UTC-4 during daylight saving (roughly Mar-Nov)
-    # and UTC-5 the rest of the year — adjust by 1 hour twice a year,
-    # or just leave it and accept the brief lands an hour off in winter.
-    - cron: "30 11 * * 1-5"   # ~7:30am ET, Mon-Fri -> premarket
-    - cron: "15 20 * * 1-5"   # ~4:15pm ET, Mon-Fri -> close
+    # Premarket: 9:00 AM ET during daylight saving time
+    - cron: "0 13 * * 1-5"
+
+    # Close: 4:15 PM ET during daylight saving time
+    - cron: "15 20 * * 1-5"
 
 jobs:
-  brief:
+  market-brief:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - run: pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install requests
 
-      - name: Run premarket brief
-        if: github.event.schedule == '30 11 * * 1-5' || github.event.inputs.mode == 'premarket'
+      - name: Determine brief type
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          else
+            HOUR=$(date -u +%H)
+            MINUTE=$(date -u +%M)
+
+            if [ "$HOUR" = "13" ]; then
+              echo "mode=premarket" >> "$GITHUB_OUTPUT"
+            else
+              echo "mode=close" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Run market brief
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          WATCHLIST: ${{ secrets.WATCHLIST }}
-        run: python main.py premarket
-
-      - name: Run close recap
-        if: github.event.schedule == '15 20 * * 1-5' || github.event.inputs.mode == 'close'
-        env:
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          WATCHLIST: ${{ secrets.WATCHLIST }}
-        run: python main.py close
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          python main.py ${{ steps.mode.outputs.mode }}

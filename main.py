@@ -115,7 +115,7 @@ def call_claude(prompt, api_key):
             "content-type": "application/json",
         },
         json={
-            "model": "claude-sonnet-4-6",
+            "model": "claude-sonnet-5",
             "max_tokens": 1000,
             "messages": [{"role": "user", "content": prompt}],
         },
@@ -156,6 +156,10 @@ def main():
     email_to = os.environ["EMAIL_TO"]
     email_from = os.environ["EMAIL_FROM"]
 
+    import hashlib
+    print(f"DEBUG email_to fingerprint: {hashlib.sha256(email_to.encode()).hexdigest()[:12]}")
+    print(f"DEBUG email_from fingerprint: {hashlib.sha256(email_from.encode()).hexdigest()[:12]}")
+
     watchlist = get_watchlist()
     all_syms = INDEX_SYMS + watchlist
 
@@ -192,3 +196,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

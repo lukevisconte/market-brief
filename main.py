@@ -1,15 +1,16 @@
 """
-Trading Day Market Brief
+INSTITUTIONAL-STYLE MARKET BRIEF
 
 Pulls:
 - U.S. market indices
-- Watchlist stock prices
-- Market news
+- Large-cap watchlist
+- Market proxies for oil, gold, volatility, global markets
+- Broad market news
 
-Claude turns the information into an easy-to-understand
-institutional-style market briefing and sends it through Gmail.
+Claude turns the information into a concise investor briefing
+and sends it through Gmail SMTP.
 
-Required GitHub Actions secrets:
+GitHub Actions secrets required:
 
 FINNHUB_API_KEY
 ANTHROPIC_API_KEY
@@ -33,15 +34,35 @@ import requests
 
 
 # ============================================================
-# U.S. MARKET INDICES
+# U.S. MARKET
 # ============================================================
 
 INDEX_SYMS = [
-    "SPY",   # S&P 500
-    "QQQ",   # Nasdaq
-    "DIA",   # Dow Jones
-    "IWM",   # Russell 2000
+    "SPY",      # S&P 500 proxy
+    "QQQ",      # Nasdaq-100 proxy
+    "DIA",      # Dow Jones proxy
+    "IWM",      # Russell 2000 proxy
 ]
+
+
+# ============================================================
+# MARKET / MACRO PROXIES
+#
+# These are intentionally liquid ETFs rather than invented
+# economic figures.
+# ============================================================
+
+MACRO_PROXIES = {
+    "GLD": "Gold",
+    "USO": "Oil",
+    "TLT": "Long-term U.S. Treasuries",
+    "UUP": "U.S. Dollar",
+    "EWJ": "Japan equities",
+    "MCHI": "China equities",
+    "EWG": "Germany equities",
+    "EWU": "United Kingdom equities",
+    "EEM": "Emerging markets",
+}
 
 
 # ============================================================
@@ -93,7 +114,7 @@ def get_watchlist():
 
 
 # ============================================================
-# FINNHUB QUOTES
+# FINNHUB QUOTE
 # ============================================================
 
 def fetch_quote(symbol, key):
@@ -122,10 +143,10 @@ def fetch_quote(symbol, key):
 
 
 # ============================================================
-# FINNHUB NEWS
+# MARKET NEWS
 # ============================================================
 
-def fetch_news(key, limit=20):
+def fetch_news(key, limit=30):
 
     url = (
         f"https://finnhub.io/api/v1/news"
@@ -157,8 +178,8 @@ def fetch_news(key, limit=20):
 
 def fmt(q):
 
-    price = q["price"]
-    chg = q["change_pct"]
+    price = q.get("price")
+    chg = q.get("change_pct")
 
     if price is None:
         price_s = "N/A"
@@ -178,12 +199,71 @@ def fmt(q):
 
 
 # ============================================================
+# BUILD MARKET DATA BLOCK
+# ============================================================
+
+def build_market_data(
+    index_quotes,
+    macro_quotes,
+    watch_quotes
+):
+
+    index_lines = "\n".join(
+        fmt(q)
+        for q in index_quotes
+    )
+
+    macro_lines = []
+
+    for symbol, description in MACRO_PROXIES.items():
+
+        q = macro_quotes.get(symbol)
+
+        if q is None:
+            continue
+
+        macro_lines.append(
+            f"{description} [{symbol}]: {fmt(q)}"
+        )
+
+    macro_block = "\n".join(
+        macro_lines
+    )
+
+    watch_lines = []
+
+    for q in watch_quotes:
+
+        symbol = q["symbol"]
+
+        company = WATCHLIST.get(
+            symbol,
+            symbol
+        )
+
+        watch_lines.append(
+            f"{company} [{symbol}]: {fmt(q)}"
+        )
+
+    watch_block = "\n".join(
+        watch_lines
+    )
+
+    return (
+        index_lines,
+        macro_block,
+        watch_block
+    )
+
+
+# ============================================================
 # BUILD CLAUDE PROMPT
 # ============================================================
 
 def build_prompt(
     mode,
     index_quotes,
+    macro_quotes,
     watch_quotes,
     news
 ):
@@ -194,28 +274,9 @@ def build_prompt(
             "PREMARKET — before the U.S. market opens"
         )
 
-        final_section = """
-4. SUGGESTED MOVES
-
-End with 3-5 practical things an investor could consider
-watching or positioning around today.
-
-These are ideas, not guarantees.
-
-For each suggested move, briefly explain WHY it makes sense.
-
-Possible categories include:
-
-- A sector worth watching
-- A stock worth researching
-- A macro risk worth monitoring
-- A catalyst worth waiting for
-- A potential hedge
-- A market signal that would confirm or invalidate a thesis
-
-Do not pretend to know what hedge funds or asset managers
-are doing unless the supplied information provides actual evidence.
-"""
+        final_title = (
+            "WHAT TO WATCH AT THE OPEN"
+        )
 
     else:
 
@@ -223,54 +284,50 @@ are doing unless the supplied information provides actual evidence.
             "MARKET CLOSE — after the U.S. market has finished trading"
         )
 
-        final_section = """
-4. SUGGESTED MOVES FOR TOMORROW
+        final_title = (
+            "WHAT MATTERS FOR TOMORROW"
+        )
 
-End with 3-5 practical things an investor could consider
-watching or positioning around for the next session.
-
-Explain WHY each idea matters.
-
-Focus on:
-
-- What worked today
-- What failed
-- Sectors gaining leadership
-- Sectors losing leadership
-- Individual stocks worth researching
-- Upcoming catalysts
-- Macro risks
-- Potential hedges
-
-Do not pretend to know what hedge funds or asset managers
-are doing unless the supplied information provides actual evidence.
-"""
-
-    # --------------------------------------------------------
-    # INDEX DATA
-    # --------------------------------------------------------
-
-    index_lines = "\n".join(
-        fmt(q)
-        for q in index_quotes
+    (
+        index_lines,
+        macro_lines,
+        watch_lines
+    ) = build_market_data(
+        index_quotes,
+        macro_quotes,
+        watch_quotes
     )
 
     # --------------------------------------------------------
-    # WATCHLIST DATA
+    # NEWS
     # --------------------------------------------------------
 
-    watch_lines = "\n".join(
-        fmt(q)
-        for q in watch_quotes
-    )
+    news_lines = []
 
-    # --------------------------------------------------------
-    # NEWS DATA
-    # --------------------------------------------------------
+    for n in news:
 
-    news_lines = "\n".join(
-        f"- {n['headline']} ({n['source']}): {n['summary']}"
-        for n in news
+        headline = n.get(
+            "headline",
+            ""
+        )
+
+        source = n.get(
+            "source",
+            ""
+        )
+
+        summary = n.get(
+            "summary",
+            ""
+        )
+
+        news_lines.append(
+            f"- {headline} "
+            f"({source}): {summary}"
+        )
+
+    news_block = "\n".join(
+        news_lines
     )
 
     # --------------------------------------------------------
@@ -280,382 +337,446 @@ are doing unless the supplied information provides actual evidence.
     return f"""
 You are my personal market and macro research analyst.
 
-This is a {mode_label} briefing.
+Produce a high-quality {mode_label} briefing.
 
-I am an investor who researches individual companies and wants
-to understand BOTH individual stocks and the macro environment
-driving the market.
+I follow individual companies and want to understand the
+larger market environment that is driving their stocks.
 
-Your job is NOT to simply summarize the news.
+The goal is NOT to produce a generic financial-news summary.
 
-Your job is to explain:
+The goal is to answer:
 
-1. WHAT IS HAPPENING?
-2. WHY IS IT HAPPENING?
-3. WHY DOES IT MATTER?
-4. WHAT SHOULD I WATCH OR CONSIDER DOING?
+WHAT IS HAPPENING?
+
+WHY IS IT HAPPENING?
+
+WHY DOES IT MATTER?
+
+WHAT SHOULD AN INVESTOR WATCH NEXT?
 
 Use plain English.
 
-Assume I understand basic investing and financial statements,
-but I do NOT want unnecessary Wall Street jargon.
+I understand stocks, financial statements, valuation, earnings,
+and basic economics.
+
+However, do not drown me in Wall Street jargon.
 
 If you use a technical term, explain it briefly.
 
-For example:
-
-Instead of:
-
-"Real yields are creating duration pressure."
-
-Say:
-
-"Higher real yields are putting pressure on growth stocks
-because investors can earn more from relatively safe bonds,
-making distant future earnings less valuable today."
-
-That is the style I want.
-
 ============================================================
-1. WHAT MATTERS TODAY
+IMPORTANT DATA RULES
 ============================================================
 
-Start with:
+ONLY use numbers that are actually supplied below.
+
+DO NOT invent:
+
+- Treasury yields
+- Currency exchange rates
+- Oil prices
+- Gold prices
+- Global index levels
+- Economic data
+- Hedge fund positions
+- Asset manager positions
+- Analyst estimates
+- Earnings expectations
+
+If a specific piece of data is not supplied, say that it is
+not available rather than guessing.
+
+Distinguish clearly between:
+
+FACT:
+Something directly supported by the supplied market data
+or news.
+
+INTERPRETATION:
+Your explanation of what the data may mean.
+
+Do not present speculation as fact.
+
+Do not automatically assume that a stock's movement has a
+particular cause just because the explanation sounds logical.
+
+============================================================
+1. FIVE-SECOND MARKET SNAPSHOT
+============================================================
+
+Start with a very short snapshot.
+
+Show:
+
+Dow
+S&P 500
+Nasdaq
+Russell 2000
+
+Then answer:
+
+- Is the market broadly up or down?
+- Which part of the market is leading?
+- Is this more growth-oriented or value/cyclical?
+- Are small caps participating?
+- Is the move broad or concentrated?
+
+Give me the conclusion in plain English.
+
+Example:
+
+"Risk appetite is positive, but leadership is rotating away
+from mega-cap technology toward cyclicals and smaller companies."
+
+Only make that conclusion if the data supports it.
+
+============================================================
+2. MARKET DASHBOARD
+============================================================
+
+Create a compact dashboard covering:
+
+U.S.:
 
 - Dow
 - S&P 500
 - Nasdaq
 - Russell 2000
 
-Explain:
+Macro proxies supplied below:
 
-- Which index is leading
-- Which is lagging
-- Whether investors appear comfortable taking risk
-- Whether money is moving toward growth or value
-- Whether large companies are outperforming smaller companies
-- Whether the market rally appears broad or concentrated
+- Gold
+- Oil
+- Long-term Treasuries
+- U.S. dollar
+- Japan equities
+- China equities
+- Germany equities
+- U.K. equities
+- Emerging markets
 
-Explain the WHY.
+Do NOT simply list the numbers.
+
+Explain the most important relationships.
 
 For example:
 
-If Nasdaq is outperforming:
+If long-duration Treasury prices are falling:
 
-Explain whether that could be related to falling yields,
-AI optimism, earnings expectations, technology news, etc.
+"That generally suggests longer-term yields are rising,
+which can put pressure on expensive growth stocks."
 
-If the Dow is outperforming:
+If oil is rising:
 
-Explain whether that suggests investors are favoring more
-defensive or economically sensitive companies.
+"That can support energy companies such as XOM, but it can
+also increase inflation pressure and raise costs elsewhere."
 
-If small caps are outperforming:
+If Japan or China is moving differently from the U.S.:
 
-Explain whether that could indicate investors expect stronger
-economic growth or easier financial conditions.
+Explain whether that may indicate a different regional
+economic or risk environment.
 
-Do NOT automatically assume the reason.
+Remember:
 
-Only make conclusions supported by the data and news.
+These ETFs are MARKET PROXIES.
 
-============================================================
-2. LARGE-CAP STOCKS TO WATCH
-============================================================
-
-Analyze the watchlist below.
-
-Do NOT discuss all 21 companies.
-
-Choose approximately 5-7 companies that matter most TODAY.
-
-Prioritize:
-
-- Major news
-- Earnings
-- Guidance
-- Analyst actions
-- Product announcements
-- Regulatory developments
-- Unusual price moves
-- Sector importance
-- Upcoming catalysts
-- Macro sensitivity
-
-Pay particular attention to companies that can move entire sectors.
-
-Examples:
-
-NVDA / AVGO / TSM
-→ AI infrastructure and semiconductor spending
-
-MSFT / GOOGL / AMZN
-→ Cloud, AI, advertising, and enterprise spending
-
-AAPL
-→ Consumer demand and mega-cap technology
-
-AXP / V
-→ Consumer spending and financial conditions
-
-CAT / GE
-→ Industrial activity and economic growth
-
-XOM
-→ Oil prices and energy demand
-
-LLY
-→ Healthcare and obesity-drug trends
-
-COST / KO
-→ Consumer spending and defensive behavior
-
-TSLA
-→ EV demand, China, interest rates, and risk appetite
-
-PLTR / CRWD
-→ Software, AI, cybersecurity, and growth-stock valuations
-
-CEG
-→ Electricity demand, power prices, nuclear energy,
-and AI data-center demand
-
-NU
-→ Emerging-market growth, Latin America, and financial conditions
-
-ISRG
-→ Healthcare spending and elective procedures
-
-These are examples of relationships.
-
-Do not automatically assume they are affecting the stocks today.
-
-Use the actual news and data to determine what matters.
+Do not describe them as exact Treasury yields, FX rates,
+or official economic indicators.
 
 ============================================================
-3. MACRO ENVIRONMENT
+3. GLOBAL MARKETS
 ============================================================
 
-This section is extremely important.
+Explain what is happening outside the United States.
 
-Explain the major macro forces affecting the market.
+Pay particular attention to:
 
-Cover the areas that matter today.
+Japan
+China
+Europe
+Emerging markets
 
-------------------------------------------------------------
+Discuss whether global markets are:
+
+- Confirming the U.S. move
+- Contradicting the U.S. move
+- Leading the U.S.
+- Lagging the U.S.
+
+Explain why that matters.
+
+For example:
+
+"If U.S. stocks are rising while emerging markets are falling,
+the rally may be more concentrated than the headline S&P move
+suggests."
+
+Only say this when supported by the supplied data.
+
+============================================================
+4. MACRO FACTORS
+============================================================
+
+Explain the major macro forces affecting investors.
+
+Focus on:
+
 INTEREST RATES
-------------------------------------------------------------
+
+Explain what the Treasury proxy is suggesting and how rates
+could affect:
+
+- Growth stocks
+- Banks
+- Consumers
+- Industrials
+- Housing
+- Valuations
+
+DOLLAR
+
+Use the supplied dollar proxy when available.
+
+Explain how dollar strength or weakness could affect:
+
+- Multinational companies
+- Emerging markets
+- Commodities
+- U.S. financial conditions
+
+COMMODITIES
 
 Discuss:
 
-- Treasury yields
-- Federal Reserve expectations
-- Inflation expectations
-- Rate cuts
-- Rate hikes
-- Economic growth expectations
-
-Explain WHY rates matter.
-
-For example:
-
-"Higher yields can pressure growth stocks because investors
-can earn more from relatively safe bonds, while higher rates
-also reduce the present value of future corporate earnings."
-
-Connect rates to the companies on the watchlist whenever relevant.
-
-------------------------------------------------------------
-CURRENCIES
-------------------------------------------------------------
-
-Discuss when relevant:
-
-- U.S. dollar
-- USD/JPY
-- EUR/USD
-- GBP/USD
-- Chinese yuan
-
-Explain what the currency movement means.
-
-For example:
-
-"A stronger dollar can be a headwind for multinational companies
-because overseas revenue is worth less when converted back into dollars."
-
-Explain when currency moves may signal:
-
-- Risk appetite
-- Global capital flows
-- Interest-rate differences
-- Carry trades
-- Economic expectations
-
-Do NOT just list currencies.
-
-Explain WHY the movement matters.
-
-------------------------------------------------------------
-GLOBAL MARKETS
-------------------------------------------------------------
-
-Discuss when relevant:
-
-- Japan
-- Nikkei
-- China
-- Hong Kong
-- Europe
-- Emerging markets
-
-Explain whether foreign markets are:
-
-- Confirming
-- Contradicting
-- Leading
-- Lagging
-
-the U.S. market.
-
-Explain the connection.
-
-For example:
-
-"If Japanese equities are rising alongside U.S. equities,
-that could suggest broader global risk appetite rather than
-a rally isolated to American technology stocks."
-
-Again, only say this if the available data supports it.
-
-------------------------------------------------------------
-COMMODITIES
-------------------------------------------------------------
-
-Discuss when relevant:
-
 - Oil
 - Gold
-- Natural gas
-- Other important commodities
 
-Explain the investment connection.
+when they are meaningfully moving.
 
-For example:
+Explain what those movements could mean for:
 
-"Rising oil prices can help Exxon but increase costs for
-energy-intensive businesses and potentially add to inflation."
+XOM
+CAT
+airlines
+consumers
+inflation
+risk appetite
 
-Or:
+GLOBAL RISK
 
-"Gold rising while equities fall can indicate investors
-are seeking defensive assets."
+Explain whether the combination of U.S. markets, global markets,
+commodities and the dollar suggests:
 
-Do not automatically assume these relationships are active today.
+- Risk-on
+- Risk-off
+- Rotation
+- Mixed conditions
+
+Do not force the market into one label if the evidence is mixed.
 
 ============================================================
-4. MACRO → STOCK CONNECTIONS
+5. LARGE-CAP STOCKS THAT MATTER TODAY
 ============================================================
 
-This section is specifically designed to help me understand
-how macro factors affect the companies I follow.
+You have the following watchlist:
 
-Identify the 3-5 most important macro-to-stock connections.
+AAPL
+AMZN
+AXP
+AVGO
+CAT
+KO
+CEG
+CRWD
+LLY
+XOM
+GE
+GOOGL
+ISRG
+MSFT
+NU
+NVDA
+PLTR
+TSLA
+TSM
+COST
+V
+
+Do NOT discuss every stock.
+
+Choose approximately 5-7 that matter most TODAY.
+
+Prioritize:
+
+1. Biggest unusual moves
+2. Important company-specific news
+3. Earnings
+4. Guidance
+5. Regulatory developments
+6. Major product developments
+7. Sector significance
+8. Macro sensitivity
+9. Read-through to other companies
+
+For each selected stock:
+
+- State the move
+- Explain what appears to be driving it
+- Explain why it matters
+- Mention any relevant sector read-through
+
+Example:
+
+NVDA:
+
+"NVDA is down 0.98% ahead of earnings. The important issue
+isn't today's move by itself; the report could affect sentiment
+across AVGO, TSM and other AI infrastructure names."
+
+Do not invent catalysts.
+
+============================================================
+6. SMALLER / HIGH-BETA MOVERS
+============================================================
+
+From the available watchlist, identify 2-4 stocks that are
+moving unusually strongly relative to the rest.
+
+These do NOT need to be the largest companies.
+
+Look for:
+
+- Large percentage moves
+- High-beta names
+- Companies with potentially important catalysts
+- Stocks whose moves could indicate broader investor sentiment
+
+Explain why each one is interesting.
+
+Do not call something a "micro-cap" unless you actually know
+it is a micro-cap.
+
+Use "smaller/high-beta mover" instead.
+
+============================================================
+7. MACRO → STOCK CONNECTIONS
+============================================================
+
+Give me 3-5 of the most important connections between the
+macro environment and my companies.
 
 Examples:
 
-Higher yields
-→ Potential pressure on NVDA / PLTR / CRWD valuations
+Higher long-term rates
+→ potentially harder environment for expensive growth stocks
 
-Stronger oil
-→ Potential benefit for XOM
+Higher oil
+→ potential benefit for XOM
 
 Stronger consumer spending
-→ Potential benefit for AXP / V / COST
+→ potentially positive for AXP, V and COST
 
 Weak consumer spending
-→ Potential pressure on AXP / COST / KO
+→ potential pressure on consumer-sensitive companies
 
-Higher AI spending
-→ Potential benefit for NVDA / AVGO / TSM / MSFT
+AI investment
+→ potential read-through for NVDA, AVGO, TSM, MSFT and GOOGL
 
-Stronger dollar
-→ Potential headwind for multinational companies
+Strong dollar
+→ potential headwind for multinational companies
 
-Japanese yen movement
-→ Potential signal about global risk appetite
+Japan / global risk appetite
+→ potentially important signal for broader risk positioning
 
-Again, these are examples.
+These are examples only.
 
-Use the actual market data and news to determine
-which relationships matter today.
+Use the actual data to determine which connections matter TODAY.
 
 ============================================================
-5. INVESTOR TAKEAWAY
+8. INVESTOR TAKEAWAY
 ============================================================
 
-Give me 3-5 conclusions.
-
-Answer:
+Give me a short section answering:
 
 "If I only had two minutes to understand today's market,
 what would I need to know?"
 
+Give me 4-6 bullet points.
+
 Prioritize:
 
 - Market leadership
-- Macro direction
-- Interest rates
-- Currencies
+- Macro environment
+- Rates
+- Dollar
+- Commodities
 - Global markets
-- Sector rotation
-- Important individual stocks
-- Major catalysts
-- Major risks
+- Important stocks
+- Biggest catalyst
+- Biggest risk
 
-Use plain English.
+Avoid generic statements like:
 
-Do NOT give generic investment clichés.
+"The market is uncertain."
 
-============================================================
-6. SUGGESTED MOVES
-============================================================
-
-{final_section}
+Tell me WHAT is uncertain and WHY.
 
 ============================================================
-IMPORTANT RULES
+9. {final_title}
 ============================================================
 
-Do not invent information.
+End with 3-5 practical things worth watching.
 
-Do not invent reasons for stock movements.
+These are NOT personalized financial advice.
 
-Do not invent institutional activity.
+Think like an equity research analyst.
 
-Do not claim hedge funds are buying or selling something
-unless the supplied news explicitly provides evidence.
+Possible ideas:
 
-Do not claim "smart money" is doing something without evidence.
+- A stock worth researching
+- A catalyst worth waiting for
+- A sector worth watching
+- A macro signal that would change the thesis
+- A potential risk
+- A potential hedge
+- A market confirmation signal
 
-Do not make generic statements.
+For every suggested move, explain WHY.
 
-Do not simply repeat headlines.
+If there is insufficient evidence to recommend a specific
+position, say what information you would want to see first.
 
-Paraphrase headlines.
+============================================================
+10. WRITING STYLE
+============================================================
 
-Use numbers whenever they are available.
+Write like a smart analyst talking to another investor.
 
-Explain WHY something matters.
+Be:
 
-Think like an equity research analyst explaining the market
-to an intelligent investor.
+- Direct
+- Specific
+- Analytical
+- Concise
+- Easy to understand
 
-The briefing should be useful to someone trying to decide:
+Avoid:
 
-"What should I pay attention to today?"
+- Corporate jargon
+- Empty market clichés
+- Repeating the same point
+- Excessive disclaimers
+- Generic "investors will be watching" language
 
-Keep the entire briefing under 750 words.
+Use numbers.
+
+Connect causes to effects.
+
+Do not simply summarize headlines.
+
+The goal is to make me smarter about the market after
+reading this email.
+
+Keep the entire briefing under 1,000 words.
 
 ============================================================
 U.S. MARKET DATA
@@ -664,7 +785,13 @@ U.S. MARKET DATA
 {index_lines}
 
 ============================================================
-WATCHLIST DATA
+MACRO / GLOBAL MARKET PROXIES
+============================================================
+
+{macro_lines}
+
+============================================================
+WATCHLIST
 ============================================================
 
 {watch_lines}
@@ -673,7 +800,7 @@ WATCHLIST DATA
 RECENT MARKET NEWS
 ============================================================
 
-{news_lines}
+{news_block}
 """
 
 
@@ -692,7 +819,7 @@ def call_claude(prompt, api_key):
         },
         json={
             "model": "claude-sonnet-5",
-            "max_tokens": 1800,
+            "max_tokens": 2400,
             "messages": [
                 {
                     "role": "user",
@@ -700,16 +827,12 @@ def call_claude(prompt, api_key):
                 }
             ],
         },
-        timeout=45,
+        timeout=60,
     )
 
     print(
         f"Claude status: {r.status_code}"
     )
-
-    # --------------------------------------------------------
-    # SHOW ERROR IF CLAUDE FAILS
-    # --------------------------------------------------------
 
     if not r.ok:
 
@@ -723,21 +846,18 @@ def call_claude(prompt, api_key):
 
         r.raise_for_status()
 
-    # --------------------------------------------------------
-    # PARSE RESPONSE
-    # --------------------------------------------------------
-
     data = r.json()
-
-    print(
-        "Claude response received."
-    )
 
     text_blocks = []
 
-    for block in data.get("content", []):
+    for block in data.get(
+        "content",
+        []
+    ):
 
-        if block.get("type") == "text":
+        if block.get(
+            "type"
+        ) == "text":
 
             text = block.get(
                 "text",
@@ -754,9 +874,9 @@ def call_claude(prompt, api_key):
         text_blocks
     ).strip()
 
-    # --------------------------------------------------------
-    # EMPTY RESPONSE CHECK
-    # --------------------------------------------------------
+    print(
+        "Claude response received."
+    )
 
     print(
         f"Claude response length: "
@@ -774,7 +894,7 @@ def call_claude(prompt, api_key):
 
 
 # ============================================================
-# GMAIL
+# GMAIL SMTP
 # ============================================================
 
 def send_email(
@@ -792,7 +912,7 @@ def send_email(
     ]
 
     # --------------------------------------------------------
-    # EMAIL BODY CHECK
+    # SAFETY CHECK
     # --------------------------------------------------------
 
     if not body_text or not body_text.strip():
@@ -822,7 +942,7 @@ def send_email(
     msg["Subject"] = subject
 
     # --------------------------------------------------------
-    # SEND
+    # SMTP
     # --------------------------------------------------------
 
     print(
@@ -886,8 +1006,26 @@ def main():
 
         sys.exit(1)
 
+    print("")
+    print("=" * 70)
+
+    if mode == "premarket":
+
+        print(
+            "RUNNING PREMARKET MARKET BRIEF"
+        )
+
+    else:
+
+        print(
+            "RUNNING MARKET CLOSE BRIEF"
+        )
+
+    print("=" * 70)
+    print("")
+
     # --------------------------------------------------------
-    # API KEYS
+    # SECRETS
     # --------------------------------------------------------
 
     finnhub_key = os.environ[
@@ -918,7 +1056,16 @@ def main():
 
     all_syms = (
         INDEX_SYMS
+        + list(MACRO_PROXIES.keys())
         + watchlist
+    )
+
+    # Remove duplicates while preserving order.
+
+    all_syms = list(
+        dict.fromkeys(
+            all_syms
+        )
     )
 
     # --------------------------------------------------------
@@ -927,8 +1074,9 @@ def main():
 
     quotes = {}
 
+    print("")
     print(
-        "Fetching market quotes..."
+        "Fetching market data..."
     )
 
     for sym in all_syms:
@@ -940,10 +1088,16 @@ def main():
                 finnhub_key
             )
 
+            print(
+                f"{sym}: "
+                f"{fmt(quotes[sym])}"
+            )
+
         except Exception as e:
 
             print(
-                f"Quote failed for {sym}: {e}"
+                f"Quote failed for "
+                f"{sym}: {e}"
             )
 
             quotes[sym] = {
@@ -958,6 +1112,7 @@ def main():
     # GET NEWS
     # --------------------------------------------------------
 
+    print("")
     print(
         "Fetching market news..."
     )
@@ -968,7 +1123,12 @@ def main():
 
         news = fetch_news(
             finnhub_key,
-            limit=20
+            limit=30
+        )
+
+        print(
+            f"Retrieved "
+            f"{len(news)} news items."
         )
 
     except Exception as e:
@@ -978,7 +1138,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # PREPARE INDEX DATA
+    # INDEX QUOTES
     # --------------------------------------------------------
 
     index_quotes = [
@@ -987,7 +1147,16 @@ def main():
     ]
 
     # --------------------------------------------------------
-    # PREPARE WATCHLIST DATA
+    # MACRO QUOTES
+    # --------------------------------------------------------
+
+    macro_quotes = {
+        symbol: quotes.get(symbol)
+        for symbol in MACRO_PROXIES
+    }
+
+    # --------------------------------------------------------
+    # WATCHLIST QUOTES
     # --------------------------------------------------------
 
     watch_quotes = [
@@ -999,13 +1168,15 @@ def main():
     # BUILD PROMPT
     # --------------------------------------------------------
 
+    print("")
     print(
-        "Building market analysis..."
+        "Building analyst prompt..."
     )
 
     prompt = build_prompt(
         mode,
         index_quotes,
+        macro_quotes,
         watch_quotes,
         news
     )
@@ -1024,14 +1195,20 @@ def main():
     )
 
     # --------------------------------------------------------
-    # PRINT CLAUDE OUTPUT
+    # PRINT OUTPUT TO GITHUB LOG
     # --------------------------------------------------------
 
     print("")
     print("=" * 70)
-    print("CLAUDE MARKET BRIEF")
+    print(
+        "CLAUDE MARKET BRIEF"
+    )
     print("=" * 70)
-    print(brief_text)
+
+    print(
+        brief_text
+    )
+
     print("=" * 70)
     print("")
 
@@ -1040,7 +1217,9 @@ def main():
     # --------------------------------------------------------
 
     today = (
-        datetime.now(timezone.utc)
+        datetime.now(
+            timezone.utc
+        )
         .astimezone()
         .strftime("%a %b %d")
     )
@@ -1051,18 +1230,22 @@ def main():
 
     if mode == "premarket":
 
-        label = "Premarket Market Brief"
+        label = (
+            "Premarket Market Brief"
+        )
 
     else:
 
-        label = "Market Close Recap"
+        label = (
+            "Market Close Recap"
+        )
 
     subject = (
         f"{label} — {today}"
     )
 
     # --------------------------------------------------------
-    # SEND EMAIL
+    # SEND
     # --------------------------------------------------------
 
     send_email(
@@ -1076,21 +1259,16 @@ def main():
     # --------------------------------------------------------
 
     print("")
+    print("=" * 70)
     print(
-        "========================================"
+        f"SUCCESS: Market brief sent to "
+        f"{email_to}"
     )
-
-    print(
-        f"SUCCESS: Sent to {email_to}"
-    )
-
-    print(
-        "========================================"
-    )
+    print("=" * 70)
 
 
 # ============================================================
-# ENTRY POINT
+# RUN
 # ============================================================
 
 if __name__ == "__main__":

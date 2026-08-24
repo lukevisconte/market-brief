@@ -141,6 +141,8 @@ def send_email(subject, body_text, resend_key, to_addr, from_addr):
         },
         timeout=15,
     )
+    print(f"DEBUG resend status: {r.status_code}")
+    print(f"DEBUG resend response body: {r.text}")
     r.raise_for_status()
 
 

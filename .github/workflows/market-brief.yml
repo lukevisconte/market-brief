@@ -13,17 +13,29 @@ on:
           - close
 
   schedule:
-    # Premarket: 9:00 AM ET during daylight saving time
+    # Premarket: 9:00 AM Eastern Time
+    # 13:00 UTC during daylight saving time
     - cron: "0 13 * * 1-5"
 
-    # Close: 4:15 PM ET during daylight saving time
+    # Close: 4:15 PM Eastern Time
+    # 20:15 UTC during daylight saving time
     - cron: "15 20 * * 1-5"
 
 jobs:
-  market-brief:
+
+  # ==========================================================
+  # PREMARKET
+  # ==========================================================
+
+  premarket:
+    if: >
+      github.event_name == 'schedule' &&
+      github.event.schedule == '0 13 * * 1-5'
+
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -36,23 +48,7 @@ jobs:
         run: |
           pip install requests
 
-      - name: Determine brief type
-        id: mode
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
-          else
-            HOUR=$(date -u +%H)
-            MINUTE=$(date -u +%M)
-
-            if [ "$HOUR" = "13" ]; then
-              echo "mode=premarket" >> "$GITHUB_OUTPUT"
-            else
-              echo "mode=close" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-
-      - name: Run market brief
+      - name: Run premarket brief
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -60,4 +56,74 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
-          python main.py ${{ steps.mode.outputs.mode }}
+          python main.py premarket
+
+
+  # ==========================================================
+  # CLOSE
+  # ==========================================================
+
+  close:
+    if: >
+      github.event_name == 'schedule' &&
+      github.event.schedule == '15 20 * * 1-5'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run close brief
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          python main.py close
+
+
+  # ==========================================================
+  # MANUAL RUN
+  # ==========================================================
+
+  manual:
+    if: github.event_name == 'workflow_dispatch'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run selected brief
+        env:
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: |
+          python main.py ${{ github.event.inputs.mode }}

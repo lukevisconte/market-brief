@@ -1,10 +1,8 @@
 """
-Trading day brief — pulls U.S. and global market data + news,
-asks Claude to write an institutional-style market briefing,
+Trading day brief — pulls quotes + news, asks Claude to write a briefing,
 and emails it through Gmail SMTP.
 
-Required GitHub Actions secrets:
-
+Required environment variables:
   FINNHUB_API_KEY
   ANTHROPIC_API_KEY
   EMAIL_TO
@@ -12,7 +10,6 @@ Required GitHub Actions secrets:
   GMAIL_APP_PASSWORD
 
 Usage:
-
   python main.py premarket
   python main.py close
 """
@@ -27,73 +24,86 @@ import requests
 
 
 # ============================================================
-# CONFIGURATION
+# MARKET INDICES
 # ============================================================
 
-# Major U.S. market ETFs used as reliable market proxies.
-US_MARKETS = {
-    "SPY": "S&P 500",
-    "QQQ": "Nasdaq 100",
-    "DIA": "Dow Jones",
-    "IWM": "Russell 2000",
-}
-
-
-# Global equity markets.
-GLOBAL_MARKETS = {
-    "EWJ": "Japan",
-    "FXI": "China large-cap",
-    "EWH": "Hong Kong",
-    "VGK": "Europe",
-}
-
-
-# Major currency relationships.
-# Finnhub/OANDA symbols are used for FX.
-FX_MARKETS = {
-    "OANDA:USD_JPY": "USD/JPY",
-    "OANDA:EUR_USD": "EUR/USD",
-    "OANDA:GBP_USD": "GBP/USD",
-    "OANDA:USD_CNH": "USD/CNH",
-}
-
-
-# Major commodities.
-COMMODITIES = {
-    "OANDA:XAU_USD": "Gold",
-    "OANDA:BCO_USD": "Brent crude",
-    "OANDA:WTICO_USD": "WTI crude",
-}
+INDEX_SYMS = [
+    "SPY",   # S&P 500
+    "QQQ",   # Nasdaq
+    "DIA",   # Dow Jones
+    "IWM",   # Russell 2000
+]
 
 
 # ============================================================
-# HTTP HELPER
+# WATCHLIST
 # ============================================================
 
-def get_json(url, timeout=15):
+WATCHLIST = {
+    "AAPL": "Apple Inc.",
+    "AMZN": "Amazon.com Inc.",
+    "AXP": "American Express Co.",
+    "AVGO": "Broadcom Inc.",
+    "CAT": "Caterpillar Inc.",
+    "KO": "Coca-Cola Co.",
+    "CEG": "Constellation Energy Corp.",
+    "CRWD": "CrowdStrike Holdings Inc.",
+    "LLY": "Eli Lilly and Co.",
+    "XOM": "Exxon Mobil Corp.",
+    "GE": "GE Aerospace",
+    "GOOGL": "Alphabet Inc.",
+    "ISRG": "Intuitive Surgical Inc.",
+    "MSFT": "Microsoft Corp.",
+    "NU": "Nu Holdings Ltd.",
+    "NVDA": "NVIDIA Corp.",
+    "PLTR": "Palantir Technologies Inc.",
+    "TSLA": "Tesla Inc.",
+    "TSM": "Taiwan Semiconductor Manufacturing Co.",
+    "COST": "Costco Wholesale Corp.",
+    "V": "Visa Inc.",
+}
+
+
+# ============================================================
+# WATCHLIST HELPER
+# ============================================================
+
+def get_watchlist():
     """
-    Simple GET request helper.
+    Returns the hard-coded watchlist above.
+
+    WATCHLIST can still optionally be overridden through a GitHub
+    Actions environment variable if desired.
     """
-    r = requests.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+
+    raw = os.environ.get("WATCHLIST", "")
+
+    if raw.strip():
+        return [
+            s.strip().upper()
+            for s in raw.split(",")
+            if s.strip()
+        ]
+
+    return list(WATCHLIST.keys())
 
 
 # ============================================================
-# FINNHUB — QUOTES
+# FINNHUB QUOTES
 # ============================================================
 
 def fetch_quote(symbol, key):
-    """
-    Fetch the latest quote for a symbol.
-    """
 
     url = (
         f"https://finnhub.io/api/v1/quote"
         f"?symbol={symbol}&token={key}"
     )
 
-    r = requests.get(url, timeout=10)
+    r = requests.get(
+        url,
+        timeout=10
+    )
+
     r.raise_for_status()
 
     d = r.json()
@@ -108,221 +118,61 @@ def fetch_quote(symbol, key):
 
 
 # ============================================================
-# FINNHUB — NEWS
+# FINNHUB NEWS
 # ============================================================
 
-def fetch_news(key, limit=20):
-    """
-    Pull general market news.
-
-    We keep the related symbols when Finnhub provides them.
-    This allows the program to discover stocks dynamically
-    instead of relying on a hard-coded watchlist.
-    """
+def fetch_news(key, limit=15):
 
     url = (
         f"https://finnhub.io/api/v1/news"
         f"?category=general&token={key}"
     )
 
-    r = requests.get(url, timeout=15)
+    r = requests.get(
+        url,
+        timeout=15
+    )
+
     r.raise_for_status()
 
     items = r.json()[:limit]
 
-    news = []
-
-    for item in items:
-        news.append({
-            "headline": item.get("headline", ""),
-            "summary": item.get("summary", ""),
-            "source": item.get("source", ""),
-            "related": item.get("related", ""),
-            "datetime": item.get("datetime"),
-        })
-
-    return news
+    return [
+        {
+            "headline": i.get("headline"),
+            "summary": i.get("summary", ""),
+            "source": i.get("source"),
+        }
+        for i in items
+    ]
 
 
 # ============================================================
-# FINNHUB — COMPANY PROFILE
+# FORMAT QUOTES
 # ============================================================
 
-def fetch_company_profile(symbol, key):
-    """
-    Pull basic company information including market
-    capitalization when available.
-    """
+def fmt(q):
 
-    url = (
-        f"https://finnhub.io/api/v1/stock/profile2"
-        f"?symbol={symbol}&token={key}"
+    price = q["price"]
+    chg = q["change_pct"]
+
+    price_s = (
+        f"${price:.2f}"
+        if price is not None
+        else "—"
     )
 
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
+    chg_s = (
+        f"{chg:+.2f}%"
+        if chg is not None
+        else ""
+    )
 
-        d = r.json()
-
-        return {
-            "symbol": symbol,
-            "name": d.get("name"),
-            "market_cap": d.get("marketCapitalization"),
-            "industry": d.get("finnhubIndustry"),
-            "exchange": d.get("exchange"),
-        }
-
-    except Exception:
-        return {
-            "symbol": symbol,
-            "name": None,
-            "market_cap": None,
-            "industry": None,
-            "exchange": None,
-        }
-
-
-# ============================================================
-# DISCOVER NEWS-DRIVEN STOCKS
-# ============================================================
-
-def discover_news_stocks(news):
-    """
-    Extract stock symbols mentioned in Finnhub's related field.
-
-    This replaces the old hard-coded watchlist.
-    """
-
-    symbols = []
-
-    for item in news:
-        related = item.get("related", "")
-
-        if not related:
-            continue
-
-        for symbol in related.split(","):
-            symbol = symbol.strip().upper()
-
-            # Basic filtering.
-            if not symbol:
-                continue
-
-            if symbol not in symbols:
-                symbols.append(symbol)
-
-    # Keep the candidate list manageable.
-    return symbols[:25]
-
-
-def build_stock_candidates(news, key):
-    """
-    Build a list of dynamically discovered stocks from the news.
-
-    Includes:
-      - quote
-      - company name
-      - market capitalization
-      - industry
-      - news relationship
-    """
-
-    symbols = discover_news_stocks(news)
-
-    candidates = []
-
-    for symbol in symbols:
-
-        try:
-            quote = fetch_quote(symbol, key)
-            profile = fetch_company_profile(symbol, key)
-
-            candidates.append({
-                "symbol": symbol,
-                "name": profile.get("name"),
-                "price": quote.get("price"),
-                "change_pct": quote.get("change_pct"),
-                "market_cap": profile.get("market_cap"),
-                "industry": profile.get("industry"),
-            })
-
-        except Exception as e:
-            print(f"candidate failed for {symbol}: {e}")
-
-    return candidates
-
-
-# ============================================================
-# FORMAT MARKET DATA
-# ============================================================
-
-def format_quote(symbol, label, quote):
-    """
-    Format a market quote for Claude.
-    """
-
-    price = quote.get("price")
-    change_pct = quote.get("change_pct")
-
-    if price is None:
-        price_s = "N/A"
-    else:
-        price_s = f"{price:.2f}"
-
-    if change_pct is None:
-        change_s = "N/A"
-    else:
-        change_s = f"{change_pct:+.2f}%"
-
-    return f"{label}: {price_s} ({change_s})"
-
-
-def format_stock_candidates(candidates):
-    """
-    Format dynamically discovered stock candidates.
-    """
-
-    lines = []
-
-    for stock in candidates:
-
-        symbol = stock.get("symbol", "")
-        name = stock.get("name") or "Unknown company"
-        price = stock.get("price")
-        change_pct = stock.get("change_pct")
-        market_cap = stock.get("market_cap")
-        industry = stock.get("industry") or "Unknown industry"
-
-        price_s = (
-            f"${price:.2f}"
-            if price is not None
-            else "N/A"
-        )
-
-        change_s = (
-            f"{change_pct:+.2f}%"
-            if change_pct is not None
-            else "N/A"
-        )
-
-        if market_cap is None:
-            market_cap_s = "Unknown"
-        else:
-            market_cap_s = f"{market_cap:,.0f}M"
-
-        lines.append(
-            f"{symbol} | {name} | "
-            f"Price: {price_s} | "
-            f"Move: {change_s} | "
-            f"Market cap: {market_cap_s} | "
-            f"Industry: {industry}"
-        )
-
-    if not lines:
-        return "No news-linked stock candidates were identified."
-
-    return "\n".join(lines)
+    return (
+        f"{q['symbol']}: "
+        f"{price_s} "
+        f"({chg_s})"
+    )
 
 
 # ============================================================
@@ -331,16 +181,10 @@ def format_stock_candidates(candidates):
 
 def build_prompt(
     mode,
-    us_market_data,
-    global_market_data,
-    fx_data,
-    commodity_data,
-    stock_candidates,
-    news,
+    index_quotes,
+    watch_quotes,
+    news
 ):
-    """
-    Build the institutional-style market briefing prompt.
-    """
 
     mode_label = (
         "PREMARKET, before the U.S. market opens"
@@ -353,31 +197,25 @@ def build_prompt(
         final_section = """
 4. SUGGESTED MOVES
 
-Give 2-4 practical things an investor could consider doing or monitoring
-based on the evidence.
+End with 2-4 concrete things an investor could consider watching,
+doing, or positioning around today.
 
-Focus on:
-- sector positioning
-- large-cap opportunities
-- smaller/micro-cap opportunities
-- risk management
-- macro hedges
-- catalysts worth waiting for
-- confirmation signals
+Think in terms of:
+- sectors
+- individual stocks
+- catalysts
+- macro risks
+- risk/reward
+- potential hedges
+- areas where capital may be rotating
 
-When discussing hedge funds, institutional investors, or large asset managers,
-ONLY discuss their activity if the supplied news provides evidence.
+Do not present anything as a guaranteed outcome.
 
-Never invent:
-- fund positions
-- institutional buying or selling
-- portfolio allocations
-- fund flows
-- options positioning
-- insider activity
-- "smart money" activity
+If discussing hedge funds, institutional investors, or asset managers,
+ONLY make claims supported by the supplied news or market data.
 
-If institutional positioning is unclear, explicitly say so.
+Never invent institutional positions, fund flows, options positioning,
+or "smart money" activity.
 """
 
     else:
@@ -385,55 +223,48 @@ If institutional positioning is unclear, explicitly say so.
         final_section = """
 4. SUGGESTED MOVES
 
-Give 2-4 practical things an investor could consider going into the next
-session based on what actually happened today.
+End with 2-4 concrete things an investor could consider going into
+the next trading session.
 
 Focus on:
-- sector positioning
-- large-cap opportunities
-- smaller/micro-cap opportunities
-- risk management
-- macro hedges
-- catalysts worth watching tomorrow
-- signals that confirm or contradict today's move
+- what worked today
+- what failed
+- sectors gaining or losing leadership
+- individual stocks worth researching
+- macro risks
+- upcoming catalysts
+- potential opportunities or hedges
 
-When discussing hedge funds, institutional investors, or large asset managers,
-ONLY discuss their activity if the supplied news provides evidence.
+Do not present anything as a guaranteed outcome.
 
-Never invent:
-- fund positions
-- institutional buying or selling
-- portfolio allocations
-- fund flows
-- options positioning
-- insider activity
-- "smart money" activity
+If discussing hedge funds, institutional investors, or asset managers,
+ONLY make claims supported by the supplied news or market data.
 
-If institutional positioning is unclear, explicitly say so.
+Never invent institutional positions, fund flows, options positioning,
+or "smart money" activity.
 """
 
-    us_lines = "\n".join(us_market_data)
-    global_lines = "\n".join(global_market_data)
-    fx_lines = "\n".join(fx_data)
-    commodity_lines = "\n".join(commodity_data)
+    index_lines = "\n".join(
+        fmt(q)
+        for q in index_quotes
+    )
+
+    watch_lines = "\n".join(
+        fmt(q)
+        for q in watch_quotes
+    )
 
     news_lines = "\n".join(
         f"- {n['headline']} ({n['source']}): {n['summary']}"
         for n in news
     )
 
-    stock_lines = format_stock_candidates(
-        stock_candidates
-    )
-
-    prompt = f"""
+    return f"""
 You are my personal institutional-market research analyst.
 
-Write a concise but highly useful {mode_label} market briefing.
-
-The audience is an investor who researches individual companies but wants
-a sophisticated understanding of the broader market, global macro conditions,
-capital flows, market leadership, and potential opportunities.
+You are writing a concise but intellectually useful {mode_label} market
+briefing for an investor who researches individual stocks but wants help
+understanding the broader market and macro environment.
 
 Do NOT simply summarize headlines.
 
@@ -443,21 +274,20 @@ WHAT IS HAPPENING?
 
 WHY DOES IT MATTER?
 
-WHAT SHOULD AN INVESTOR WATCH OR CONSIDER?
+WHAT SHOULD AN INVESTOR WATCH?
 
-Use ONLY the data and news provided below.
+Use only the market data and news provided below.
 
-Never invent facts.
+Do not invent facts, catalysts, institutional activity, or explanations
+for price movements.
 
-Never invent explanations for price movements.
-
-If the evidence is insufficient to make a conclusion, say so.
+If the evidence is insufficient, say so.
 
 ============================================================
 1. WHAT MATTERS TODAY
 ============================================================
 
-Start with the major U.S. equity indices:
+Start with the major U.S. indices:
 
 - Dow Jones
 - S&P 500
@@ -467,142 +297,108 @@ Start with the major U.S. equity indices:
 Explain:
 
 - Which indices are leading or lagging.
-- Whether the market looks risk-on, risk-off, defensive,
-  growth-oriented, value-oriented, or rotational.
+- Whether the market is risk-on, risk-off, defensive, or rotational.
 - Whether market leadership is broadening or narrowing.
-- What the relative performance of large caps versus smaller companies
-  suggests.
+- Whether large caps or smaller companies are showing stronger momentum.
+- What the index performance suggests about investor positioning.
 
-Then identify 2-4 LARGE-CAP STOCKS that could materially affect today's
-market.
+Then examine the watchlist.
+
+Identify the 3-6 watchlist companies that are MOST IMPORTANT today.
 
 Prioritize companies with:
 
-- major earnings
-- meaningful corporate news
-- guidance changes
-- analyst actions
-- major product developments
-- regulatory developments
-- unusual price action
-- major sector influence
-- other significant catalysts
-
-Do NOT simply choose the biggest companies.
-
-Choose the names that appear most relevant based on the supplied information.
-
-Then identify 2-4 SMALLER OR MICRO-CAP STOCKS worth watching.
-
-Prioritize names with:
-
-- significant news
-- unusually large price moves
-- major volume/catalysts when available
-- regulatory events
-- financing events
+- major news
 - earnings
-- contracts
-- acquisitions
-- other clearly identifiable catalysts
+- guidance
+- analyst actions
+- regulatory developments
+- product announcements
+- unusual price movement
+- major sector influence
+- important macro exposure
+- significant upcoming catalysts
 
-Do NOT force micro-cap names into the report.
+Do NOT force commentary on every stock.
 
-If there are no credible smaller-cap movers in the supplied data,
-say:
+For stocks without meaningful developments, simply ignore them.
 
-"No meaningful smaller-cap catalyst identified."
+Pay particular attention to mega-cap stocks because moves in companies such
+as Apple, Microsoft, Amazon, Alphabet, NVIDIA, Tesla, Broadcom, and others
+can materially influence the broader market.
+
+Also identify 1-3 smaller or less obvious names on the watchlist that could
+be particularly interesting even if they are not driving the major indices.
 
 ============================================================
 2. GLOBAL MACRO
 ============================================================
 
-Explain the most important global macro developments.
+Explain the global macro developments that actually matter today.
 
-Do NOT mechanically list every currency or market.
+Consider, when relevant:
 
-Only discuss the areas that actually matter.
-
-Consider:
-
-CURRENCIES:
-- U.S. dollar
+- U.S. dollar strength or weakness
 - USD/JPY
 - EUR/USD
 - GBP/USD
-- USD/CNH
-- other important currency moves when relevant
-
-GLOBAL EQUITIES:
-- Japan / Nikkei
-- China
-- Hong Kong
-- Europe
+- Chinese yuan
+- Japanese markets
+- European markets
+- Chinese/Hong Kong markets
 - emerging markets
-- other major global markets when relevant
-
-COMMODITIES:
+- Treasury yields
+- global bond markets
 - oil
 - gold
 - natural gas
-- other important commodities
-
-RATES:
-- U.S. Treasury yields
-- global bond markets
-- Federal Reserve
+- Federal Reserve policy
 - Bank of Japan
-- European Central Bank
+- ECB
 - Bank of England
-- other central banks when relevant
+- inflation
+- economic data
+- geopolitical developments
+- tariffs and trade policy
 
-GEOPOLITICS:
-- wars
-- sanctions
-- trade policy
-- tariffs
-- elections
-- major international developments
+Do NOT mechanically list every currency or foreign market.
 
-Most importantly:
+Focus on the developments that could actually affect U.S. equities.
 
-CONNECT these developments to U.S. equities.
+Explain the CONNECTION between global markets and the U.S. market.
 
 For example:
 
-- Does yen weakness/strength change the global carry trade?
-- Does dollar strength create pressure on commodities or multinational
-  earnings?
-- Are Japanese equities signaling global risk appetite?
-- Are European or Chinese markets confirming or contradicting the U.S. move?
-- Are bond yields creating valuation pressure on growth stocks?
+- Is dollar strength creating pressure on multinational companies?
+- Is yen weakness signaling stronger risk appetite or carry-trade behavior?
+- Are Japanese or European markets confirming the U.S. move?
+- Are Treasury yields putting pressure on growth-stock valuations?
 - Is oil signaling inflation or growth concerns?
-
-Explain the causal relationship rather than merely listing data.
+- Are global investors moving toward or away from risk?
 
 ============================================================
 3. INVESTOR TAKEAWAY
 ============================================================
 
-Give 3-5 high-conviction conclusions from the information above.
+Give 3-5 important conclusions.
 
 Answer:
 
-"What does an equity investor actually need to understand right now?"
+"What should an equity investor actually understand about the market
+right now?"
 
-Focus on:
+Prioritize:
 
 - market leadership
 - sector rotation
 - risk appetite
 - valuation pressure
 - macro risks
-- catalysts
-- global capital flows
+- upcoming catalysts
 - opportunities
-- risks
+- major risks
 
-Avoid generic statements.
+Do not give generic commentary.
 
 ============================================================
 4. SUGGESTED MOVES
@@ -619,30 +415,37 @@ Write like a sharp institutional morning market note.
 Be:
 
 - analytical
-- concise
 - direct
+- concise
 - skeptical
 - evidence-driven
 
 Do not use generic financial clichés.
 
-Do not say "markets are volatile" unless you explain specifically why.
+Do not say "markets remain volatile" unless you explain exactly why.
 
-Do not repeat headlines.
+Do not simply repeat headlines.
 
 Never quote headlines verbatim.
 
 Paraphrase everything.
 
-Do not fabricate institutional positioning.
+Do not make up explanations for why a stock moved.
 
-Do not pretend to know what hedge funds are doing unless the supplied
-information actually supports the claim.
+If the available data does not explain a move, say that.
 
-If institutional positioning is not available from the supplied data,
-say that institutional positioning cannot be determined from the current data.
+When discussing what hedge funds, institutional investors, or large
+asset managers are doing, only discuss it when the supplied news provides
+actual evidence.
 
-Do not provide personalized financial advice.
+Never fabricate:
+
+- hedge fund positions
+- institutional buying/selling
+- fund flows
+- options positioning
+- insider activity
+- "smart money" activity
 
 Keep the entire briefing under 600 words.
 
@@ -650,31 +453,13 @@ Keep the entire briefing under 600 words.
 U.S. MARKET DATA
 ============================================================
 
-{us_lines}
+{index_lines}
 
 ============================================================
-GLOBAL MARKET DATA
+WATCHLIST
 ============================================================
 
-{global_lines}
-
-============================================================
-CURRENCIES
-============================================================
-
-{fx_lines}
-
-============================================================
-COMMODITIES
-============================================================
-
-{commodity_lines}
-
-============================================================
-NEWS-LINKED STOCK CANDIDATES
-============================================================
-
-{stock_lines}
+{watch_lines}
 
 ============================================================
 RECENT MARKET NEWS
@@ -683,17 +468,12 @@ RECENT MARKET NEWS
 {news_lines}
 """
 
-    return prompt
-
 
 # ============================================================
 # CLAUDE
 # ============================================================
 
 def call_claude(prompt, api_key):
-    """
-    Send the market data and instructions to Claude.
-    """
 
     r = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -720,6 +500,7 @@ def call_claude(prompt, api_key):
     data = r.json()
 
     for block in data.get("content", []):
+
         if block.get("type") == "text":
             return block["text"]
 
@@ -730,15 +511,24 @@ def call_claude(prompt, api_key):
 # GMAIL
 # ============================================================
 
-def send_email(subject, body_text, to_addr):
-    """
-    Send the market brief through Gmail SMTP.
-    """
+def send_email(
+    subject,
+    body_text,
+    to_addr
+):
 
-    gmail_address = os.environ["GMAIL_ADDRESS"]
-    gmail_app_password = os.environ["GMAIL_APP_PASSWORD"]
+    gmail_address = os.environ[
+        "GMAIL_ADDRESS"
+    ]
 
-    msg = MIMEText(body_text, "plain")
+    gmail_app_password = os.environ[
+        "GMAIL_APP_PASSWORD"
+    ]
+
+    msg = MIMEText(
+        body_text,
+        "plain"
+    )
 
     msg["From"] = gmail_address
     msg["To"] = to_addr
@@ -756,7 +546,9 @@ def send_email(subject, body_text, to_addr):
     ) as server:
 
         server.ehlo()
+
         server.starttls()
+
         server.ehlo()
 
         server.login(
@@ -770,7 +562,9 @@ def send_email(subject, body_text, to_addr):
             msg.as_string()
         )
 
-    print("Email sent successfully.")
+    print(
+        "Email sent successfully."
+    )
 
 
 # ============================================================
@@ -785,175 +579,102 @@ def main():
         else "premarket"
     )
 
-    if mode not in ("premarket", "close"):
+    if mode not in (
+        "premarket",
+        "close"
+    ):
+
         print(
             "Usage: python main.py "
             "[premarket|close]"
         )
+
         sys.exit(1)
 
     # --------------------------------------------------------
     # API KEYS
     # --------------------------------------------------------
 
-    finnhub_key = os.environ["FINNHUB_API_KEY"]
-    anthropic_key = os.environ["ANTHROPIC_API_KEY"]
+    finnhub_key = os.environ[
+        "FINNHUB_API_KEY"
+    ]
 
-    email_to = os.environ["EMAIL_TO"]
+    anthropic_key = os.environ[
+        "ANTHROPIC_API_KEY"
+    ]
+
+    email_to = os.environ[
+        "EMAIL_TO"
+    ]
 
     # --------------------------------------------------------
-    # U.S. MARKETS
+    # WATCHLIST
     # --------------------------------------------------------
 
-    us_market_data = []
+    watchlist = get_watchlist()
 
-    print("Fetching U.S. market data...")
+    print(
+        f"Tracking {len(watchlist)} "
+        f"watchlist companies."
+    )
 
-    for symbol, label in US_MARKETS.items():
+    # --------------------------------------------------------
+    # ALL SYMBOLS
+    # --------------------------------------------------------
+
+    all_syms = (
+        INDEX_SYMS
+        + watchlist
+    )
+
+    # --------------------------------------------------------
+    # GET QUOTES
+    # --------------------------------------------------------
+
+    quotes = {}
+
+    print(
+        "Fetching market quotes..."
+    )
+
+    for sym in all_syms:
 
         try:
-            quote = fetch_quote(
-                symbol,
-                finnhub_key
-            )
 
-            us_market_data.append(
-                format_quote(
-                    symbol,
-                    label,
-                    quote
-                )
+            quotes[sym] = fetch_quote(
+                sym,
+                finnhub_key
             )
 
         except Exception as e:
 
             print(
-                f"U.S. market quote failed "
-                f"for {symbol}: {e}"
+                f"Quote failed for {sym}: {e}"
             )
 
-            us_market_data.append(
-                f"{label}: data unavailable"
-            )
+            quotes[sym] = {
+                "symbol": sym,
+                "price": None,
+                "change_pct": None,
+                "change": None,
+                "previous_close": None,
+            }
 
     # --------------------------------------------------------
-    # GLOBAL MARKETS
+    # GET NEWS
     # --------------------------------------------------------
-
-    global_market_data = []
-
-    print("Fetching global market data...")
-
-    for symbol, label in GLOBAL_MARKETS.items():
-
-        try:
-            quote = fetch_quote(
-                symbol,
-                finnhub_key
-            )
-
-            global_market_data.append(
-                format_quote(
-                    symbol,
-                    label,
-                    quote
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                f"Global quote failed "
-                f"for {symbol}: {e}"
-            )
-
-            global_market_data.append(
-                f"{label}: data unavailable"
-            )
-
-    # --------------------------------------------------------
-    # FX
-    # --------------------------------------------------------
-
-    fx_data = []
-
-    print("Fetching currency data...")
-
-    for symbol, label in FX_MARKETS.items():
-
-        try:
-            quote = fetch_quote(
-                symbol,
-                finnhub_key
-            )
-
-            fx_data.append(
-                format_quote(
-                    symbol,
-                    label,
-                    quote
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                f"FX quote failed "
-                f"for {symbol}: {e}"
-            )
-
-            fx_data.append(
-                f"{label}: data unavailable"
-            )
-
-    # --------------------------------------------------------
-    # COMMODITIES
-    # --------------------------------------------------------
-
-    commodity_data = []
-
-    print("Fetching commodity data...")
-
-    for symbol, label in COMMODITIES.items():
-
-        try:
-            quote = fetch_quote(
-                symbol,
-                finnhub_key
-            )
-
-            commodity_data.append(
-                format_quote(
-                    symbol,
-                    label,
-                    quote
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                f"Commodity quote failed "
-                f"for {symbol}: {e}"
-            )
-
-            commodity_data.append(
-                f"{label}: data unavailable"
-            )
-
-    # --------------------------------------------------------
-    # NEWS
-    # --------------------------------------------------------
-
-    print("Fetching market news...")
 
     news = []
+
+    print(
+        "Fetching market news..."
+    )
 
     try:
 
         news = fetch_news(
             finnhub_key,
-            limit=20
+            limit=15
         )
 
     except Exception as e:
@@ -963,49 +684,28 @@ def main():
         )
 
     # --------------------------------------------------------
-    # DISCOVER NEWS-DRIVEN STOCKS
+    # PREPARE DATA
     # --------------------------------------------------------
 
-    print(
-        "Finding news-driven stock candidates..."
-    )
+    index_quotes = [
+        quotes[s]
+        for s in INDEX_SYMS
+    ]
 
-    stock_candidates = []
-
-    try:
-
-        stock_candidates = build_stock_candidates(
-            news,
-            finnhub_key
-        )
-
-    except Exception as e:
-
-        print(
-            f"Stock discovery failed: {e}"
-        )
-
-    print(
-        f"Found {len(stock_candidates)} "
-        f"news-linked stock candidates."
-    )
+    watch_quotes = [
+        quotes[s]
+        for s in watchlist
+    ]
 
     # --------------------------------------------------------
-    # BUILD CLAUDE PROMPT
+    # BUILD PROMPT
     # --------------------------------------------------------
-
-    print(
-        "Building market analysis..."
-    )
 
     prompt = build_prompt(
-        mode=mode,
-        us_market_data=us_market_data,
-        global_market_data=global_market_data,
-        fx_data=fx_data,
-        commodity_data=commodity_data,
-        stock_candidates=stock_candidates,
-        news=news,
+        mode,
+        index_quotes,
+        watch_quotes,
+        news
     )
 
     # --------------------------------------------------------
@@ -1042,7 +742,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # PRINT BRIEF
+    # PRINT
     # --------------------------------------------------------
 
     print("")
@@ -1054,7 +754,7 @@ def main():
     print("")
 
     # --------------------------------------------------------
-    # SEND EMAIL
+    # EMAIL
     # --------------------------------------------------------
 
     send_email(

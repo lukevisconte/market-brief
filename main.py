@@ -4,15 +4,12 @@ Trading Day Market Brief
 Pulls:
 - U.S. market indices
 - Watchlist stock prices
-- Global macro data
-- Currencies
-- Commodities
 - Market news
 
 Claude turns the information into an easy-to-understand
 institutional-style market briefing and sends it through Gmail.
 
-Required environment variables:
+Required GitHub Actions secrets:
 
 FINNHUB_API_KEY
 ANTHROPIC_API_KEY
@@ -75,6 +72,10 @@ WATCHLIST = {
     "V": "Visa",
 }
 
+
+# ============================================================
+# WATCHLIST
+# ============================================================
 
 def get_watchlist():
 
@@ -177,7 +178,7 @@ def fmt(q):
 
 
 # ============================================================
-# BUILD PROMPT
+# BUILD CLAUDE PROMPT
 # ============================================================
 
 def build_prompt(
@@ -199,24 +200,21 @@ def build_prompt(
 End with 3-5 practical things an investor could consider
 watching or positioning around today.
 
-These should be ideas, not guarantees.
+These are ideas, not guarantees.
 
 For each suggested move, briefly explain WHY it makes sense.
 
-Examples:
+Possible categories include:
 
 - A sector worth watching
 - A stock worth researching
-- A macro risk worth hedging
+- A macro risk worth monitoring
 - A catalyst worth waiting for
+- A potential hedge
 - A market signal that would confirm or invalidate a thesis
 
-When discussing hedge funds, institutional investors, or asset managers,
-ONLY mention their behavior if the supplied information provides actual
-evidence.
-
-Never invent fund positions, institutional flows, options positioning,
-or "smart money" activity.
+Do not pretend to know what hedge funds or asset managers
+are doing unless the supplied information provides actual evidence.
 """
 
     else:
@@ -235,37 +233,49 @@ Explain WHY each idea matters.
 
 Focus on:
 
-- what worked today
-- what failed
-- sectors gaining leadership
-- sectors losing leadership
-- individual stocks worth researching
-- upcoming catalysts
-- macro risks
-- potential hedges
+- What worked today
+- What failed
+- Sectors gaining leadership
+- Sectors losing leadership
+- Individual stocks worth researching
+- Upcoming catalysts
+- Macro risks
+- Potential hedges
 
-When discussing hedge funds, institutional investors, or asset managers,
-ONLY mention their behavior if the supplied information provides actual
-evidence.
-
-Never invent fund positions, institutional flows, options positioning,
-or "smart money" activity.
+Do not pretend to know what hedge funds or asset managers
+are doing unless the supplied information provides actual evidence.
 """
+
+    # --------------------------------------------------------
+    # INDEX DATA
+    # --------------------------------------------------------
 
     index_lines = "\n".join(
         fmt(q)
         for q in index_quotes
     )
 
+    # --------------------------------------------------------
+    # WATCHLIST DATA
+    # --------------------------------------------------------
+
     watch_lines = "\n".join(
         fmt(q)
         for q in watch_quotes
     )
 
+    # --------------------------------------------------------
+    # NEWS DATA
+    # --------------------------------------------------------
+
     news_lines = "\n".join(
         f"- {n['headline']} ({n['source']}): {n['summary']}"
         for n in news
     )
+
+    # --------------------------------------------------------
+    # PROMPT
+    # --------------------------------------------------------
 
     return f"""
 You are my personal market and macro research analyst.
@@ -300,9 +310,9 @@ Instead of:
 
 Say:
 
-"Higher real yields are putting pressure on growth stocks because
-investors can earn more from relatively safe bonds, making distant
-future earnings less valuable today."
+"Higher real yields are putting pressure on growth stocks
+because investors can earn more from relatively safe bonds,
+making distant future earnings less valuable today."
 
 That is the style I want.
 
@@ -361,16 +371,16 @@ Choose approximately 5-7 companies that matter most TODAY.
 
 Prioritize:
 
-- major news
-- earnings
-- guidance
-- analyst actions
-- major product announcements
-- regulatory developments
-- unusual price moves
-- sector importance
-- upcoming catalysts
-- macro sensitivity
+- Major news
+- Earnings
+- Guidance
+- Analyst actions
+- Product announcements
+- Regulatory developments
+- Unusual price moves
+- Sector importance
+- Upcoming catalysts
+- Macro sensitivity
 
 Pay particular attention to companies that can move entire sectors.
 
@@ -380,45 +390,47 @@ NVDA / AVGO / TSM
 → AI infrastructure and semiconductor spending
 
 MSFT / GOOGL / AMZN
-→ cloud, AI, advertising, enterprise spending
+→ Cloud, AI, advertising, and enterprise spending
 
 AAPL
-→ consumer demand and mega-cap technology
+→ Consumer demand and mega-cap technology
 
 AXP / V
-→ consumer spending and financial conditions
+→ Consumer spending and financial conditions
 
 CAT / GE
-→ industrial activity and economic growth
+→ Industrial activity and economic growth
 
 XOM
-→ oil prices and energy demand
+→ Oil prices and energy demand
 
 LLY
-→ healthcare / obesity-drug trends
+→ Healthcare and obesity-drug trends
 
 COST / KO
-→ consumer spending and defensive behavior
+→ Consumer spending and defensive behavior
 
 TSLA
-→ EV demand, rates, China, and risk appetite
+→ EV demand, China, interest rates, and risk appetite
 
 PLTR / CRWD
-→ software, AI, cybersecurity, and growth-stock valuation
+→ Software, AI, cybersecurity, and growth-stock valuations
 
 CEG
-→ electricity demand, power prices, nuclear energy, and AI
-data-center demand
+→ Electricity demand, power prices, nuclear energy,
+and AI data-center demand
 
 NU
-→ emerging-market growth, Latin America, and financial conditions
+→ Emerging-market growth, Latin America, and financial conditions
 
 ISRG
-→ healthcare spending and elective procedures
+→ Healthcare spending and elective procedures
 
-Do not blindly use these relationships.
+These are examples of relationships.
 
-Use them as context when the day's data actually supports them.
+Do not automatically assume they are affecting the stocks today.
+
+Use the actual news and data to determine what matters.
 
 ============================================================
 3. MACRO ENVIRONMENT
@@ -428,35 +440,42 @@ This section is extremely important.
 
 Explain the major macro forces affecting the market.
 
-Cover the areas that matter today:
+Cover the areas that matter today.
 
+------------------------------------------------------------
 INTEREST RATES
+------------------------------------------------------------
 
-Explain:
+Discuss:
 
 - Treasury yields
-- Fed expectations
-- inflation expectations
-- rate cuts or hikes
-- what this means for stocks
+- Federal Reserve expectations
+- Inflation expectations
+- Rate cuts
+- Rate hikes
+- Economic growth expectations
 
 Explain WHY rates matter.
 
 For example:
 
-"Higher yields make bonds more attractive relative to stocks
-and also reduce the present value of future corporate earnings,
-which tends to hurt expensive growth companies more."
+"Higher yields can pressure growth stocks because investors
+can earn more from relatively safe bonds, while higher rates
+also reduce the present value of future corporate earnings."
 
-CURRENCY
+Connect rates to the companies on the watchlist whenever relevant.
 
-Discuss:
+------------------------------------------------------------
+CURRENCIES
+------------------------------------------------------------
+
+Discuss when relevant:
 
 - U.S. dollar
 - USD/JPY
 - EUR/USD
 - GBP/USD
-- Chinese yuan when relevant
+- Chinese yuan
 
 Explain what the currency movement means.
 
@@ -465,15 +484,21 @@ For example:
 "A stronger dollar can be a headwind for multinational companies
 because overseas revenue is worth less when converted back into dollars."
 
-Also explain when currency moves may signal:
+Explain when currency moves may signal:
 
-- risk appetite
-- global capital flows
-- interest-rate differences
-- carry trades
-- economic expectations
+- Risk appetite
+- Global capital flows
+- Interest-rate differences
+- Carry trades
+- Economic expectations
 
+Do NOT just list currencies.
+
+Explain WHY the movement matters.
+
+------------------------------------------------------------
 GLOBAL MARKETS
+------------------------------------------------------------
 
 Discuss when relevant:
 
@@ -482,39 +507,51 @@ Discuss when relevant:
 - China
 - Hong Kong
 - Europe
-- emerging markets
+- Emerging markets
 
 Explain whether foreign markets are:
 
-- confirming
-- contradicting
-- leading
-- lagging
+- Confirming
+- Contradicting
+- Leading
+- Lagging
 
 the U.S. market.
 
+Explain the connection.
+
+For example:
+
+"If Japanese equities are rising alongside U.S. equities,
+that could suggest broader global risk appetite rather than
+a rally isolated to American technology stocks."
+
+Again, only say this if the available data supports it.
+
+------------------------------------------------------------
 COMMODITIES
+------------------------------------------------------------
 
-Discuss:
+Discuss when relevant:
 
-- oil
-- gold
-- natural gas
-- other important commodities
+- Oil
+- Gold
+- Natural gas
+- Other important commodities
 
 Explain the investment connection.
 
 For example:
 
-"Rising oil prices can help Exxon but hurt airlines and increase
-inflation pressure."
+"Rising oil prices can help Exxon but increase costs for
+energy-intensive businesses and potentially add to inflation."
 
 Or:
 
-"Gold rising while equities fall can signal investors are seeking
-a defensive asset."
+"Gold rising while equities fall can indicate investors
+are seeking defensive assets."
 
-Do not make the example into a conclusion unless today's data supports it.
+Do not automatically assume these relationships are active today.
 
 ============================================================
 4. MACRO → STOCK CONNECTIONS
@@ -528,25 +565,25 @@ Identify the 3-5 most important macro-to-stock connections.
 Examples:
 
 Higher yields
-→ pressure on NVDA / PLTR / CRWD valuations
+→ Potential pressure on NVDA / PLTR / CRWD valuations
 
 Stronger oil
-→ positive for XOM
+→ Potential benefit for XOM
 
 Stronger consumer spending
-→ positive for AXP / V / COST
+→ Potential benefit for AXP / V / COST
 
-Weakening consumer spending
-→ negative for AXP / COST / KO
+Weak consumer spending
+→ Potential pressure on AXP / COST / KO
 
 Higher AI spending
-→ positive for NVDA / AVGO / TSM / MSFT
+→ Potential benefit for NVDA / AVGO / TSM / MSFT
 
 Stronger dollar
-→ potential headwind for multinational companies
+→ Potential headwind for multinational companies
 
 Japanese yen movement
-→ potential signal for global risk appetite
+→ Potential signal about global risk appetite
 
 Again, these are examples.
 
@@ -566,17 +603,19 @@ what would I need to know?"
 
 Prioritize:
 
-- market leadership
-- macro direction
-- rates
-- currencies
-- global markets
-- sector rotation
-- important individual stocks
-- major catalysts
-- major risks
+- Market leadership
+- Macro direction
+- Interest rates
+- Currencies
+- Global markets
+- Sector rotation
+- Important individual stocks
+- Major catalysts
+- Major risks
 
 Use plain English.
+
+Do NOT give generic investment clichés.
 
 ============================================================
 6. SUGGESTED MOVES
@@ -594,8 +633,8 @@ Do not invent reasons for stock movements.
 
 Do not invent institutional activity.
 
-Do not claim hedge funds are buying or selling something unless
-the supplied news explicitly provides evidence.
+Do not claim hedge funds are buying or selling something
+unless the supplied news explicitly provides evidence.
 
 Do not claim "smart money" is doing something without evidence.
 
@@ -611,6 +650,10 @@ Explain WHY something matters.
 
 Think like an equity research analyst explaining the market
 to an intelligent investor.
+
+The briefing should be useful to someone trying to decide:
+
+"What should I pay attention to today?"
 
 Keep the entire briefing under 750 words.
 
@@ -635,7 +678,7 @@ RECENT MARKET NEWS
 
 
 # ============================================================
-# CLAUDE
+# CLAUDE API
 # ============================================================
 
 def call_claude(prompt, api_key):
@@ -660,17 +703,74 @@ def call_claude(prompt, api_key):
         timeout=45,
     )
 
-    r.raise_for_status()
+    print(
+        f"Claude status: {r.status_code}"
+    )
+
+    # --------------------------------------------------------
+    # SHOW ERROR IF CLAUDE FAILS
+    # --------------------------------------------------------
+
+    if not r.ok:
+
+        print(
+            "Claude API error:"
+        )
+
+        print(
+            r.text
+        )
+
+        r.raise_for_status()
+
+    # --------------------------------------------------------
+    # PARSE RESPONSE
+    # --------------------------------------------------------
 
     data = r.json()
+
+    print(
+        "Claude response received."
+    )
+
+    text_blocks = []
 
     for block in data.get("content", []):
 
         if block.get("type") == "text":
 
-            return block["text"]
+            text = block.get(
+                "text",
+                ""
+            ).strip()
 
-    return "No response generated."
+            if text:
+
+                text_blocks.append(
+                    text
+                )
+
+    final_text = "\n\n".join(
+        text_blocks
+    ).strip()
+
+    # --------------------------------------------------------
+    # EMPTY RESPONSE CHECK
+    # --------------------------------------------------------
+
+    print(
+        f"Claude response length: "
+        f"{len(final_text)} characters"
+    )
+
+    if not final_text:
+
+        raise ValueError(
+            "Claude returned an empty response. "
+            "No email was sent."
+        )
+
+    return final_text
 
 
 # ============================================================
@@ -691,14 +791,39 @@ def send_email(
         "GMAIL_APP_PASSWORD"
     ]
 
+    # --------------------------------------------------------
+    # EMAIL BODY CHECK
+    # --------------------------------------------------------
+
+    if not body_text or not body_text.strip():
+
+        raise ValueError(
+            "Refusing to send email because "
+            "the email body is empty."
+        )
+
+    print(
+        f"Email body length: "
+        f"{len(body_text)} characters"
+    )
+
+    # --------------------------------------------------------
+    # CREATE EMAIL
+    # --------------------------------------------------------
+
     msg = MIMEText(
         body_text,
-        "plain"
+        "plain",
+        "utf-8"
     )
 
     msg["From"] = gmail_address
     msg["To"] = to_addr
     msg["Subject"] = subject
+
+    # --------------------------------------------------------
+    # SEND
+    # --------------------------------------------------------
 
     print(
         f"Sending email to {to_addr} "
@@ -738,6 +863,10 @@ def send_email(
 # ============================================================
 
 def main():
+
+    # --------------------------------------------------------
+    # MODE
+    # --------------------------------------------------------
 
     mode = (
         sys.argv[1]
@@ -780,8 +909,7 @@ def main():
     watchlist = get_watchlist()
 
     print(
-        f"Tracking {len(watchlist)} "
-        f"stocks."
+        f"Tracking {len(watchlist)} stocks."
     )
 
     # --------------------------------------------------------
@@ -850,13 +978,17 @@ def main():
         )
 
     # --------------------------------------------------------
-    # PREPARE QUOTES
+    # PREPARE INDEX DATA
     # --------------------------------------------------------
 
     index_quotes = [
         quotes[s]
         for s in INDEX_SYMS
     ]
+
+    # --------------------------------------------------------
+    # PREPARE WATCHLIST DATA
+    # --------------------------------------------------------
 
     watch_quotes = [
         quotes[s]
@@ -892,7 +1024,19 @@ def main():
     )
 
     # --------------------------------------------------------
-    # SUBJECT
+    # PRINT CLAUDE OUTPUT
+    # --------------------------------------------------------
+
+    print("")
+    print("=" * 70)
+    print("CLAUDE MARKET BRIEF")
+    print("=" * 70)
+    print(brief_text)
+    print("=" * 70)
+    print("")
+
+    # --------------------------------------------------------
+    # DATE
     # --------------------------------------------------------
 
     today = (
@@ -901,27 +1045,21 @@ def main():
         .strftime("%a %b %d")
     )
 
-    label = (
-        "Premarket Market Brief"
-        if mode == "premarket"
-        else "Market Close Recap"
-    )
+    # --------------------------------------------------------
+    # SUBJECT
+    # --------------------------------------------------------
+
+    if mode == "premarket":
+
+        label = "Premarket Market Brief"
+
+    else:
+
+        label = "Market Close Recap"
 
     subject = (
         f"{label} — {today}"
     )
-
-    # --------------------------------------------------------
-    # PRINT
-    # --------------------------------------------------------
-
-    print("")
-    print("=" * 70)
-    print(subject)
-    print("=" * 70)
-    print(brief_text)
-    print("=" * 70)
-    print("")
 
     # --------------------------------------------------------
     # SEND EMAIL
@@ -933,8 +1071,21 @@ def main():
         email_to
     )
 
+    # --------------------------------------------------------
+    # SUCCESS
+    # --------------------------------------------------------
+
+    print("")
     print(
-        f"Sent to {email_to}"
+        "========================================"
+    )
+
+    print(
+        f"SUCCESS: Sent to {email_to}"
+    )
+
+    print(
+        "========================================"
     )
 
 
@@ -943,4 +1094,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()

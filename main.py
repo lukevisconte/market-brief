@@ -27,6 +27,7 @@ python main.py close
 import os
 import sys
 import smtplib
+import time
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 
@@ -111,62 +112,142 @@ def get_watchlist():
 
 
 # ============================================================
-# FETCH QUOTE
+# FETCH QUOTE WITH RETRIES
 # ============================================================
 
 def fetch_quote(symbol, key):
+    """
+    Fetch a quote from Finnhub.
+
+    Retries temporary API/network failures up to 3 times.
+    """
 
     url = (
         f"https://finnhub.io/api/v1/quote"
         f"?symbol={symbol}&token={key}"
     )
 
-    r = requests.get(
-        url,
-        timeout=10
+    last_error = None
+
+    for attempt in range(1, 4):
+
+        try:
+
+            print(
+                f"Fetching {symbol} "
+                f"(attempt {attempt}/3)..."
+            )
+
+            r = requests.get(
+                url,
+                timeout=15
+            )
+
+            r.raise_for_status()
+
+            d = r.json()
+
+            return {
+                "symbol": symbol,
+                "price": d.get("c"),
+                "change_pct": d.get("dp"),
+                "change": d.get("d"),
+                "previous_close": d.get("pc"),
+            }
+
+        except Exception as e:
+
+            last_error = e
+
+            print(
+                f"{symbol} attempt {attempt} failed: {e}"
+            )
+
+            if attempt < 3:
+
+                wait_seconds = attempt * 3
+
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        f"Failed to fetch {symbol} after 3 attempts: "
+        f"{last_error}"
     )
-
-    r.raise_for_status()
-
-    d = r.json()
-
-    return {
-        "symbol": symbol,
-        "price": d.get("c"),
-        "change_pct": d.get("dp"),
-        "change": d.get("d"),
-        "previous_close": d.get("pc"),
-    }
 
 
 # ============================================================
-# FETCH MARKET NEWS
+# FETCH MARKET NEWS WITH RETRIES
 # ============================================================
 
 def fetch_news(key, limit=40):
+    """
+    Fetch market news from Finnhub.
+
+    Retries temporary API/network failures up to 3 times.
+    """
 
     url = (
         f"https://finnhub.io/api/v1/news"
         f"?category=general&token={key}"
     )
 
-    r = requests.get(
-        url,
-        timeout=15
+    last_error = None
+
+    for attempt in range(1, 4):
+
+        try:
+
+            print(
+                f"Fetching market news "
+                f"(attempt {attempt}/3)..."
+            )
+
+            r = requests.get(
+                url,
+                timeout=20
+            )
+
+            r.raise_for_status()
+
+            items = r.json()[:limit]
+
+            return [
+                {
+                    "headline": i.get("headline"),
+                    "summary": i.get("summary", ""),
+                    "source": i.get("source"),
+                }
+                for i in items
+            ]
+
+        except Exception as e:
+
+            last_error = e
+
+            print(
+                f"News attempt {attempt} failed: {e}"
+            )
+
+            if attempt < 3:
+
+                wait_seconds = attempt * 3
+
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        "Failed to fetch market news after 3 attempts: "
+        f"{last_error}"
     )
-
-    r.raise_for_status()
-
-    items = r.json()[:limit]
-
-    return [
-        {
-            "headline": i.get("headline"),
-            "summary": i.get("summary", ""),
-            "source": i.get("source"),
-        }
-        for i in items
-    ]
 
 
 # ============================================================
@@ -338,8 +419,7 @@ def build_prompt(
         )
 
         news_lines.append(
-            f"- {headline} "
-            f"({source}): {summary}"
+            f"- {headline} ({source}): {summary}"
         )
 
     news_block = "\n".join(
@@ -919,116 +999,179 @@ Finish the entire analysis before ending your response.
 
 
 # ============================================================
-# CALL CLAUDE
+# CALL CLAUDE WITH RETRIES
 # ============================================================
 
 def call_claude(
     prompt,
     api_key
 ):
+    """
+    Generate the market brief through Claude.
 
-    r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": "claude-sonnet-5",
+    Retries temporary API/network failures up to 3 times.
+    """
 
-            # Large output allowance.
-            # This is intentionally much higher than before.
-            "max_tokens": 16000,
+    url = "https://api.anthropic.com/v1/messages"
 
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-        },
-        timeout=180,
-    )
+    last_error = None
 
-    print(
-        f"Claude status: {r.status_code}"
-    )
+    for attempt in range(1, 4):
 
-    if not r.ok:
+        try:
 
-        print(
-            "Claude API error:"
-        )
+            print(
+                f"Calling Claude "
+                f"(attempt {attempt}/3)..."
+            )
 
-        print(
-            r.text
-        )
+            r = requests.post(
+                url,
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-5",
+                    "max_tokens": 16000,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                },
+                timeout=180,
+            )
 
-        r.raise_for_status()
+            print(
+                f"Claude status: {r.status_code}"
+            )
 
-    data = r.json()
+            if not r.ok:
 
-    # --------------------------------------------------------
-    # COLLECT ALL TEXT BLOCKS
-    # --------------------------------------------------------
+                print("Claude API error:")
+                print(r.text)
 
-    text_blocks = []
+                r.raise_for_status()
 
-    for block in data.get(
-        "content",
-        []
-    ):
+            data = r.json()
 
-        if block.get(
-            "type"
-        ) == "text":
+            text_blocks = []
 
-            text = block.get(
-                "text",
-                ""
+            for block in data.get(
+                "content",
+                []
+            ):
+
+                if block.get("type") == "text":
+
+                    text = block.get(
+                        "text",
+                        ""
+                    ).strip()
+
+                    if text:
+                        text_blocks.append(text)
+
+            final_text = "\n\n".join(
+                text_blocks
             ).strip()
 
-            if text:
+            print(
+                f"Claude response length: "
+                f"{len(final_text)} characters"
+            )
 
-                text_blocks.append(
-                    text
+            print(
+                f"Claude stop reason: "
+                f"{data.get('stop_reason')}"
+            )
+
+            if not final_text:
+
+                raise ValueError(
+                    "Claude returned an empty response."
                 )
 
-    final_text = "\n\n".join(
-        text_blocks
-    ).strip()
+            return final_text
 
-    # --------------------------------------------------------
-    # DEBUG
-    # --------------------------------------------------------
+        except Exception as e:
 
-    print(
-        f"Claude response length: "
-        f"{len(final_text)} characters"
+            last_error = e
+
+            print(
+                f"Claude attempt {attempt} failed: {e}"
+            )
+
+            if attempt < 3:
+
+                wait_seconds = attempt * 10
+
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        "Claude failed after 3 attempts: "
+        f"{last_error}"
     )
-
-    print(
-        f"Claude stop reason: "
-        f"{data.get('stop_reason')}"
-    )
-
-    # --------------------------------------------------------
-    # EMPTY RESPONSE PROTECTION
-    # --------------------------------------------------------
-
-    if not final_text:
-
-        raise ValueError(
-            "Claude returned an empty response. "
-            "Email will not be sent."
-        )
-
-    return final_text
 
 
 # ============================================================
-# GMAIL SMTP
+# VALIDATE BRIEF
+# ============================================================
+
+def validate_brief(brief_text):
+    """
+    Verify that Claude produced all nine required sections
+    before allowing the report to be emailed.
+    """
+
+    required_sections = [
+        "1. WHAT MATTERS TODAY",
+        "2. MARKET DASHBOARD",
+        "3. GLOBAL MARKETS",
+        "4. MACRO FACTORS",
+        "5. LARGE-CAP STOCKS TO WATCH",
+        "6. SMALLER / HIGH-BETA MOVERS",
+        "7. MACRO",
+        "8. INVESTOR TAKEAWAY",
+    ]
+
+    missing = []
+
+    for section in required_sections:
+
+        if section not in brief_text:
+            missing.append(section)
+
+    if (
+        "9. WHAT TO WATCH AT THE OPEN" not in brief_text
+        and
+        "9. WHAT MATTERS FOR TOMORROW" not in brief_text
+    ):
+        missing.append("Section 9")
+
+    if missing:
+
+        raise ValueError(
+            "Market brief failed validation. "
+            f"Missing: {', '.join(missing)}"
+        )
+
+    print(
+        "Brief validation passed: "
+        "all 9 sections detected."
+    )
+
+
+# ============================================================
+# GMAIL SMTP WITH RETRIES
 # ============================================================
 
 def send_email(
@@ -1036,6 +1179,11 @@ def send_email(
     body_text,
     to_addr
 ):
+    """
+    Send the market brief through Gmail SMTP.
+
+    Retries temporary SMTP/network failures up to 3 times.
+    """
 
     gmail_address = os.environ[
         "GMAIL_ADDRESS"
@@ -1044,10 +1192,6 @@ def send_email(
     gmail_app_password = os.environ[
         "GMAIL_APP_PASSWORD"
     ]
-
-    # --------------------------------------------------------
-    # SAFETY CHECK
-    # --------------------------------------------------------
 
     if not body_text or not body_text.strip():
 
@@ -1060,10 +1204,6 @@ def send_email(
         f"{len(body_text)} characters"
     )
 
-    # --------------------------------------------------------
-    # CREATE EMAIL
-    # --------------------------------------------------------
-
     msg = MIMEText(
         body_text,
         "plain",
@@ -1074,40 +1214,68 @@ def send_email(
     msg["To"] = to_addr
     msg["Subject"] = subject
 
-    # --------------------------------------------------------
-    # SEND THROUGH GMAIL
-    # --------------------------------------------------------
+    last_error = None
 
-    print(
-        f"Sending email to {to_addr} "
-        f"from {gmail_address}..."
-    )
+    for attempt in range(1, 4):
 
-    with smtplib.SMTP(
-        "smtp.gmail.com",
-        587,
-        timeout=30
-    ) as server:
+        try:
 
-        server.ehlo()
+            print(
+                f"Sending email "
+                f"(attempt {attempt}/3)..."
+            )
 
-        server.starttls()
+            with smtplib.SMTP(
+                "smtp.gmail.com",
+                587,
+                timeout=30
+            ) as server:
 
-        server.ehlo()
+                server.ehlo()
 
-        server.login(
-            gmail_address,
-            gmail_app_password
-        )
+                server.starttls()
 
-        server.sendmail(
-            gmail_address,
-            [to_addr],
-            msg.as_string()
-        )
+                server.ehlo()
 
-    print(
-        "Email sent successfully."
+                server.login(
+                    gmail_address,
+                    gmail_app_password
+                )
+
+                server.sendmail(
+                    gmail_address,
+                    [to_addr],
+                    msg.as_string()
+                )
+
+            print(
+                "Email sent successfully."
+            )
+
+            return
+
+        except Exception as e:
+
+            last_error = e
+
+            print(
+                f"Email attempt {attempt} failed: {e}"
+            )
+
+            if attempt < 3:
+
+                wait_seconds = attempt * 10
+
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        "Gmail failed after 3 attempts: "
+        f"{last_error}"
     )
 
 
@@ -1328,6 +1496,14 @@ def main():
     )
 
     # --------------------------------------------------------
+    # VALIDATE REPORT
+    # --------------------------------------------------------
+
+    validate_brief(
+        brief_text
+    )
+
+    # --------------------------------------------------------
     # PRINT REPORT
     # --------------------------------------------------------
 
@@ -1401,5 +1577,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-
     main()

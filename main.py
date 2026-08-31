@@ -1034,7 +1034,6 @@ def call_claude(
                 },
                 json={
                     "model": "claude-sonnet-5",
-                    "max_tokens": 16000,
                     "messages": [
                         {
                             "role": "user",

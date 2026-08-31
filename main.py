@@ -1022,57 +1022,81 @@ def extract_claude_text(data):
 # ============================================================
 
 def call_claude(prompt, api_key):
+    """
+    Generate the market brief through Claude.
+
+    Designed to:
+    - Avoid deprecated Claude parameters
+    - Retry transient failures
+    - Detect truncated responses
+    - Request a substantive but bounded report
+    """
 
     url = "https://api.anthropic.com/v1/messages"
-
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
 
     last_error = None
 
     for attempt in range(1, 4):
 
         try:
+
             print(
                 f"Calling Claude "
                 f"(attempt {attempt}/3)..."
             )
 
-            response = requests.post(
+            payload = {
+                "model": "claude-sonnet-5",
+                "max_tokens": 12000,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    }
+                ],
+            }
+
+            r = requests.post(
                 url,
-                headers=headers,
-                json={
-                    "model": CLAUDE_MODEL,
-                    "max_tokens": CLAUDE_MAX_TOKENS,
-                    "temperature": 0.2,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        }
-                    ],
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
                 },
-                timeout=CLAUDE_TIMEOUT,
+                json=payload,
+                timeout=300,
             )
 
             print(
-                f"Claude status: "
-                f"{response.status_code}"
+                f"Claude status: {r.status_code}"
             )
 
-            if not response.ok:
+            if not r.ok:
 
                 print("Claude API error:")
-                print(response.text[:3000])
+                print(r.text)
 
-                response.raise_for_status()
+                r.raise_for_status()
 
-            data = response.json()
+            data = r.json()
 
-            text = extract_claude_text(data)
+            text_blocks = []
+
+            for block in data.get("content", []):
+
+                if block.get("type") == "text":
+
+                    text = block.get(
+                        "text",
+                        ""
+                    ).strip()
+
+                    if text:
+                        text_blocks.append(text)
+
+            final_text = "\n\n".join(
+                text_blocks
+            ).strip()
 
             stop_reason = data.get(
                 "stop_reason"
@@ -1080,7 +1104,7 @@ def call_claude(prompt, api_key):
 
             print(
                 f"Claude response length: "
-                f"{len(text)} characters"
+                f"{len(final_text)} characters"
             )
 
             print(
@@ -1088,110 +1112,63 @@ def call_claude(prompt, api_key):
                 f"{stop_reason}"
             )
 
-            if not text:
+            if not final_text:
+
                 raise ValueError(
                     "Claude returned an empty response."
                 )
 
             # ------------------------------------------------
-            # IMPORTANT:
-            # If Claude hit max_tokens, continue the report
-            # instead of treating the truncated report as final.
+            # TRUNCATION HANDLING
             # ------------------------------------------------
 
             if stop_reason == "max_tokens":
 
                 print(
-                    "Claude reached the output limit. "
-                    "Requesting continuation..."
+                    "Claude hit the output limit. "
+                    "The response was truncated."
                 )
 
-                continuation_prompt = f"""
-Continue the market report below.
+                # Do NOT send an incomplete report.
+                # Retry with a more compact instruction.
+                if attempt < 3:
 
-The previous response was cut off before completion.
-
-DO NOT restart the report.
-
-DO NOT repeat sections already completed.
-
-Continue exactly from where the previous response stopped.
-
-You MUST finish any incomplete section and then complete
-all remaining required sections through:
-
-9. WHAT TO WATCH AT THE OPEN
-
-or:
-
-9. WHAT MATTERS FOR TOMORROW
-
-depending on the original report mode.
-
-Use only the original supplied data.
-
-Previous report:
-
-{text}
-"""
-
-                continuation_response = requests.post(
-                    url,
-                    headers=headers,
-                    json={
-                        "model": CLAUDE_MODEL,
-                        "max_tokens": CLAUDE_CONTINUATION_TOKENS,
-                        "temperature": 0.2,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": continuation_prompt,
-                            }
-                        ],
-                    },
-                    timeout=CLAUDE_TIMEOUT,
-                )
-
-                if continuation_response.ok:
-
-                    continuation_data = (
-                        continuation_response.json()
+                    prompt = (
+                        prompt
+                        + "\n\n"
+                        + "IMPORTANT: Your previous response was "
+                        "too long. Produce the complete report "
+                        "within a strict output budget. "
+                        "Keep every required section, but make "
+                        "each section concise and information-dense. "
+                        "Do not repeat information. "
+                        "Target approximately 5,000-7,000 words maximum."
                     )
 
-                    continuation_text = (
-                        extract_claude_text(
-                            continuation_data
-                        )
-                    )
-
-                    if continuation_text:
-
-                        text = (
-                            text
-                            + "\n\n"
-                            + continuation_text
-                        )
-
-                        print(
-                            "Claude continuation received."
-                        )
-
-                else:
+                    wait_seconds = attempt * 5
 
                     print(
-                        "Claude continuation failed; "
-                        "using original response."
+                        f"Retrying with a tighter output "
+                        f"instruction in {wait_seconds} seconds..."
                     )
 
-            return text
+                    time.sleep(wait_seconds)
 
-        except Exception as exc:
+                    continue
 
-            last_error = exc
+                raise ValueError(
+                    "Claude repeatedly exceeded the output "
+                    "limit and produced an incomplete report."
+                )
+
+            return final_text
+
+        except Exception as e:
+
+            last_error = e
 
             print(
-                f"Claude attempt {attempt} failed: "
-                f"{exc}"
+                f"Claude attempt {attempt} failed: {e}"
             )
 
             if attempt < 3:

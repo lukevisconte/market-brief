@@ -1,30 +1,3 @@
-```python
-"""
-INSTITUTIONAL-STYLE DAILY MARKET BRIEF
-
-Pulls:
-- U.S. market indices
-- Macro / global market proxies
-- 21-stock watchlist
-- Broad market news
-
-Claude turns the data into a substantive but controlled
-market briefing and sends it through Gmail SMTP.
-
-Required GitHub Actions secrets:
-
-FINNHUB_API_KEY
-ANTHROPIC_API_KEY
-EMAIL_TO
-GMAIL_ADDRESS
-GMAIL_APP_PASSWORD
-
-Usage:
-
-python main.py premarket
-python main.py close
-"""
-
 import os
 import sys
 import smtplib
@@ -41,24 +14,19 @@ import requests
 
 CLAUDE_MODEL = "claude-sonnet-5"
 
-# Keep the generated report substantive without allowing
-# Claude to ramble indefinitely.
-CLAUDE_MAX_TOKENS = 12000
+# Large enough for a substantive report, but intentionally
+# constrained so Claude does not wander into a 15,000+ token essay.
+CLAUDE_MAX_TOKENS = 9000
 
-# Maximum number of continuation calls if Claude truncates.
-MAX_CONTINUATIONS = 2
+# If Claude gets cut off, make one continuation attempt.
+CLAUDE_CONTINUATION_TOKENS = 5000
 
-# Maximum number of repair attempts if validation fails.
-MAX_REPAIR_ATTEMPTS = 1
+NEWS_LIMIT = 25
+NEWS_SUMMARY_LIMIT = 600
 
-# News is useful, but 40 full summaries unnecessarily inflate
-# the prompt.
-NEWS_LIMIT = 30
-
-REQUEST_TIMEOUT_QUOTES = 20
-REQUEST_TIMEOUT_NEWS = 30
-REQUEST_TIMEOUT_CLAUDE = 240
-REQUEST_TIMEOUT_SMTP = 45
+HTTP_TIMEOUT = 20
+CLAUDE_TIMEOUT = 180
+SMTP_TIMEOUT = 30
 
 
 # ============================================================
@@ -120,53 +88,45 @@ WATCHLIST = {
 
 
 # ============================================================
-# HTTP SESSION
+# HELPERS
 # ============================================================
 
-SESSION = requests.Session()
+def require_env(name):
+    value = os.environ.get(name)
 
-SESSION.headers.update(
-    {
-        "User-Agent": "Daily-Market-Brief/1.0",
-        "Accept": "application/json",
-    }
-)
+    if not value or not value.strip():
+        raise RuntimeError(
+            f"Required environment variable '{name}' is missing."
+        )
 
+    return value.strip()
 
-# ============================================================
-# GET WATCHLIST
-# ============================================================
 
 def get_watchlist():
-
     raw = os.environ.get("WATCHLIST", "")
 
     if raw.strip():
-
-        return [
-            symbol.strip().upper()
-            for symbol in raw.split(",")
-            if symbol.strip()
+        symbols = [
+            s.strip().upper()
+            for s in raw.split(",")
+            if s.strip()
         ]
+
+        # Remove duplicates while preserving order.
+        return list(dict.fromkeys(symbols))
 
     return list(WATCHLIST.keys())
 
 
-# ============================================================
-# SAFE ENVIRONMENT VARIABLE
-# ============================================================
+def safe_float(value):
+    try:
+        if value is None:
+            return None
 
-def get_required_env(name):
+        return float(value)
 
-    value = os.environ.get(name)
-
-    if not value or not value.strip():
-
-        raise RuntimeError(
-            f"Required environment variable is missing: {name}"
-        )
-
-    return value.strip()
+    except (TypeError, ValueError):
+        return None
 
 
 # ============================================================
@@ -174,29 +134,31 @@ def get_required_env(name):
 # ============================================================
 
 def fetch_quote(symbol, key):
+    """
+    Fetch a quote from Finnhub.
+
+    Retries transient failures up to 3 times.
+    """
 
     url = "https://finnhub.io/api/v1/quote"
-
-    params = {
-        "symbol": symbol,
-        "token": key,
-    }
 
     last_error = None
 
     for attempt in range(1, 4):
 
         try:
-
             print(
                 f"Fetching {symbol} "
                 f"(attempt {attempt}/3)..."
             )
 
-            response = SESSION.get(
+            response = requests.get(
                 url,
-                params=params,
-                timeout=REQUEST_TIMEOUT_QUOTES,
+                params={
+                    "symbol": symbol,
+                    "token": key,
+                },
+                timeout=HTTP_TIMEOUT,
             )
 
             response.raise_for_status()
@@ -205,14 +167,13 @@ def fetch_quote(symbol, key):
 
             return {
                 "symbol": symbol,
-                "price": data.get("c"),
-                "change_pct": data.get("dp"),
-                "change": data.get("d"),
-                "previous_close": data.get("pc"),
+                "price": safe_float(data.get("c")),
+                "change_pct": safe_float(data.get("dp")),
+                "change": safe_float(data.get("d")),
+                "previous_close": safe_float(data.get("pc")),
             }
 
         except Exception as exc:
-
             last_error = exc
 
             print(
@@ -220,8 +181,14 @@ def fetch_quote(symbol, key):
             )
 
             if attempt < 3:
+                wait_seconds = attempt * 3
 
-                time.sleep(attempt * 3)
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
 
     raise RuntimeError(
         f"Failed to fetch {symbol} after 3 attempts: "
@@ -234,29 +201,33 @@ def fetch_quote(symbol, key):
 # ============================================================
 
 def fetch_news(key, limit=NEWS_LIMIT):
+    """
+    Fetch general market news from Finnhub.
+
+    News is deliberately capped because sending dozens of
+    long summaries to Claude wastes context without improving
+    the report proportionally.
+    """
 
     url = "https://finnhub.io/api/v1/news"
-
-    params = {
-        "category": "general",
-        "token": key,
-    }
 
     last_error = None
 
     for attempt in range(1, 4):
 
         try:
-
             print(
                 f"Fetching market news "
                 f"(attempt {attempt}/3)..."
             )
 
-            response = SESSION.get(
+            response = requests.get(
                 url,
-                params=params,
-                timeout=REQUEST_TIMEOUT_NEWS,
+                params={
+                    "category": "general",
+                    "token": key,
+                },
+                timeout=HTTP_TIMEOUT,
             )
 
             response.raise_for_status()
@@ -264,7 +235,6 @@ def fetch_news(key, limit=NEWS_LIMIT):
             items = response.json()
 
             if not isinstance(items, list):
-
                 raise ValueError(
                     "Finnhub news response was not a list."
                 )
@@ -275,40 +245,34 @@ def fetch_news(key, limit=NEWS_LIMIT):
 
             for item in items:
 
-                headline = (
-                    item.get("headline")
-                    or ""
+                headline = str(
+                    item.get("headline") or ""
                 ).strip()
 
-                summary = (
-                    item.get("summary")
-                    or ""
+                summary = str(
+                    item.get("summary") or ""
                 ).strip()
 
-                source = (
-                    item.get("source")
-                    or ""
+                source = str(
+                    item.get("source") or ""
                 ).strip()
 
                 if not headline:
                     continue
 
-                # Limit individual summaries so one giant
-                # article description cannot dominate the prompt.
-                summary = summary[:1200]
+                # Prevent one enormous news summary from
+                # consuming the Claude context window.
+                summary = summary[:NEWS_SUMMARY_LIMIT]
 
-                cleaned.append(
-                    {
-                        "headline": headline,
-                        "summary": summary,
-                        "source": source,
-                    }
-                )
+                cleaned.append({
+                    "headline": headline,
+                    "summary": summary,
+                    "source": source,
+                })
 
             return cleaned
 
         except Exception as exc:
-
             last_error = exc
 
             print(
@@ -316,8 +280,14 @@ def fetch_news(key, limit=NEWS_LIMIT):
             )
 
             if attempt < 3:
+                wait_seconds = attempt * 3
 
-                time.sleep(attempt * 3)
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
 
     raise RuntimeError(
         "Failed to fetch market news after 3 attempts: "
@@ -330,24 +300,17 @@ def fetch_news(key, limit=NEWS_LIMIT):
 # ============================================================
 
 def fmt(quote):
-
     price = quote.get("price")
     change_pct = quote.get("change_pct")
 
     if price is None:
-
         price_text = "N/A"
-
     else:
-
-        price_text = f"${price:.2f}"
+        price_text = f"${price:,.2f}"
 
     if change_pct is None:
-
         change_text = "N/A"
-
     else:
-
         change_text = f"{change_pct:+.2f}%"
 
     return (
@@ -367,10 +330,20 @@ def build_market_data(
     watch_quotes,
 ):
 
-    index_lines = [
-        fmt(quote)
-        for quote in index_quotes
-    ]
+    # --------------------------------------------------------
+    # U.S. INDICES
+    # --------------------------------------------------------
+
+    index_lines = []
+
+    for quote in index_quotes:
+        index_lines.append(fmt(quote))
+
+    index_block = "\n".join(index_lines)
+
+    # --------------------------------------------------------
+    # MACRO / GLOBAL
+    # --------------------------------------------------------
 
     macro_lines = []
 
@@ -384,6 +357,12 @@ def build_market_data(
         macro_lines.append(
             f"{description} [{symbol}]: {fmt(quote)}"
         )
+
+    macro_block = "\n".join(macro_lines)
+
+    # --------------------------------------------------------
+    # WATCHLIST
+    # --------------------------------------------------------
 
     watch_lines = []
 
@@ -400,47 +379,40 @@ def build_market_data(
             f"{company} [{symbol}]: {fmt(quote)}"
         )
 
+    watch_block = "\n".join(watch_lines)
+
     return (
-        "\n".join(index_lines),
-        "\n".join(macro_lines),
-        "\n".join(watch_lines),
+        index_block,
+        macro_block,
+        watch_block,
     )
 
 
 # ============================================================
-# BUILD NEWS BLOCK
+# BUILD NEWS DATA
 # ============================================================
 
 def build_news_block(news):
 
     if not news:
-
-        return "No market news was available."
+        return "Data unavailable."
 
     lines = []
 
     for item in news:
 
-        headline = item.get(
-            "headline",
-            "",
-        )
+        headline = item.get("headline", "")
+        source = item.get("source", "")
+        summary = item.get("summary", "")
 
-        source = item.get(
-            "source",
-            "",
-        )
-
-        summary = item.get(
-            "summary",
-            "",
-        )
-
-        lines.append(
-            f"- {headline} "
-            f"({source}): "
-            f"{summary}"
-        )
+        if summary:
+            lines.append(
+                f"- {headline} ({source}): {summary}"
+            )
+        else:
+            lines.append(
+                f"- {headline} ({source})"
+            )
 
     return "\n".join(lines)
 
@@ -458,25 +430,56 @@ def build_prompt(
 ):
 
     if mode == "premarket":
-
         mode_label = (
             "PREMARKET — before the U.S. market opens"
         )
 
-        final_heading = (
+        section_9 = (
             "9. WHAT TO WATCH AT THE OPEN"
         )
 
-    else:
+        section_9_instruction = """
+Give me 4-6 specific things to monitor at the U.S. open.
 
+Prioritize:
+- breadth
+- small-cap confirmation
+- Treasury proxy
+- dollar
+- oil
+- major stock moves
+- relevant news
+- sector leadership
+- whether the existing market setup is confirmed or rejected
+
+For each item, explain WHY it matters.
+"""
+
+    else:
         mode_label = (
-            "MARKET CLOSE — after the U.S. market "
-            "has finished trading"
+            "MARKET CLOSE — after the U.S. market has finished trading"
         )
 
-        final_heading = (
+        section_9 = (
             "9. WHAT MATTERS FOR TOMORROW"
         )
+
+        section_9_instruction = """
+Give me 4-6 specific things to monitor tomorrow.
+
+Prioritize:
+- macro confirmation
+- market breadth
+- Treasury proxy
+- dollar
+- oil
+- important stocks
+- relevant company developments
+- sector leadership
+- risks that could change today's interpretation
+
+For each item, explain WHY it matters.
+"""
 
     (
         index_block,
@@ -491,19 +494,19 @@ def build_prompt(
     news_block = build_news_block(news)
 
     return f"""
-You are an institutional-style equity and macro research
-analyst producing a daily investor market brief.
+You are an institutional-style equity and macro research analyst.
 
-Produce a substantive, decision-useful {mode_label} report.
+Produce a substantive DAILY INVESTOR MARKET BRIEF for:
 
-TARGET LENGTH:
-Approximately 1,800–2,500 words.
+{mode_label}
 
-Do NOT attempt to write an enormous report.
-Do NOT pad the report with repetition.
-Prioritize analytical density over length.
+The report should be approximately 1,800-2,500 words.
 
-The report must explain:
+Do NOT try to make the report artificially short.
+
+However, do NOT ramble, repeat yourself, or produce filler.
+
+The purpose is to answer:
 
 WHAT HAPPENED?
 
@@ -513,36 +516,52 @@ WHY DOES IT MATTER?
 
 WHAT SHOULD AN INVESTOR WATCH NEXT?
 
+Write for an intelligent investor who understands:
+- stocks
+- valuation
+- earnings
+- financial statements
+- basic economics
+- market terminology
+
+Use professional Wall Street language where appropriate,
+but explain important concepts clearly.
+
 ============================================================
 NON-NEGOTIABLE DATA RULES
 ============================================================
 
-Use ONLY facts and numbers supplied in the DATA section.
+Only use numerical facts actually supplied in the DATA section.
 
-Never invent:
+DO NOT INVENT:
 
 - Treasury yields
+- interest rates
 - FX rates
 - economic statistics
-- inflation data
+- inflation
 - employment data
 - analyst estimates
 - earnings estimates
 - guidance
 - company announcements
 - regulatory developments
-- product announcements
-- fund positions
-- catalysts not present in the supplied news
+- hedge fund positions
+- institutional positions
+- valuation multiples
+- price targets
+- catalysts not contained in the supplied news
 
-If the supplied data cannot establish something, say:
+If information is unavailable, say:
 
 "Data unavailable."
 
-Separate FACT from INTERPRETATION.
+Do not manufacture missing information.
 
-When explaining a stock move without confirmation, use language
-such as:
+Distinguish FACT from INTERPRETATION.
+
+When an explanation for a stock move is not directly supported
+by the supplied news, use language such as:
 
 "may reflect"
 
@@ -553,97 +572,139 @@ such as:
 Never present speculation as confirmed fact.
 
 ============================================================
-IMPORTANT PROXY DEFINITIONS
+IMPORTANT PROXY WARNING
 ============================================================
+
+These are ETFs / MARKET PROXIES, not exact economic statistics:
 
 GLD = gold ETF
 USO = oil ETF
 TLT = long-duration U.S. Treasury ETF
 UUP = U.S. dollar ETF
-EWJ = Japan equity ETF
-MCHI = China equity ETF
-EWG = Germany equity ETF
-EWU = U.K. equity ETF
-EEM = emerging-market equity ETF
+EWJ = Japan equities ETF
+MCHI = China equities ETF
+EWG = Germany equities ETF
+EWU = U.K. equities ETF
+EEM = emerging-market equities ETF
 
-These are market proxies, NOT exact economic statistics.
+Do not convert an ETF move into an exact economic statistic.
 
-For example, if TLT falls, you may discuss pressure that is
-consistent with higher long-term rates, but do not invent a
-specific Treasury yield.
+For example, do NOT say:
+
+"The 10-year Treasury yield rose to 4.5%."
+
+if no Treasury yield was supplied.
+
+Instead say:
+
+"TLT declined, which can be consistent with pressure on
+long-duration Treasury prices and therefore potentially
+higher long-term rate expectations."
 
 ============================================================
-REQUIRED STRUCTURE
+EXACT REPORT STRUCTURE
 ============================================================
 
 You MUST produce exactly these nine numbered sections:
 
 1. WHAT MATTERS TODAY
+
 2. MARKET DASHBOARD
+
 3. GLOBAL MARKETS
+
 4. MACRO FACTORS
+
 5. LARGE-CAP STOCKS TO WATCH
+
 6. SMALLER / HIGH-BETA MOVERS
+
 7. MACRO → STOCK CONNECTIONS
+
 8. INVESTOR TAKEAWAY
-9. {final_heading}
 
-Do not omit any section.
+{section_9}
 
-Do not rename the headings.
+DO NOT rename these headings.
 
-Keep each section focused enough that the entire report can
-be completed within the target length.
+DO NOT combine sections.
+
+DO NOT omit sections.
+
+DO NOT create a separate section 10.
 
 ============================================================
 1. WHAT MATTERS TODAY
 ============================================================
 
-Open with the day's most important conclusion.
+Begin with the most important conclusion.
 
 Discuss:
 
-- S&P 500
-- Nasdaq
-- Dow
-- Russell 2000
-- leadership
-- breadth/participation using only available evidence
-- growth vs value implications when supportable
-- cyclical vs defensive behavior
-- risk-on vs risk-off vs rotation vs mixed
+- SPY
+- QQQ
+- DIA
+- IWM
 
-Do not merely list prices.
+Determine:
 
-Explain the market signal.
+- leader
+- laggard
+- small-cap participation
+- breadth
+- concentration
+- growth vs. value implications where supported
+- cyclical vs. defensive implications where supported
+- risk-on vs. risk-off vs. rotation vs. mixed
+
+Do not simply repeat prices.
+
+Explain what the combination of moves means.
 
 ============================================================
 2. MARKET DASHBOARD
 ============================================================
 
-Give a compact dashboard covering:
+Provide a concise but analytical dashboard covering:
 
-U.S.
-- S&P 500
-- Nasdaq
-- Dow
-- Russell 2000
+U.S.:
+- SPY
+- QQQ
+- DIA
+- IWM
 
-Macro
-- Gold
-- Oil
-- Long-duration Treasuries
-- Dollar
+Macro:
+- GLD
+- USO
+- TLT
+- UUP
 
-Global
-- Japan
-- China
-- Germany
-- U.K.
-- Emerging markets
+Global:
+- EWJ
+- MCHI
+- EWG
+- EWU
+- EEM
 
-Focus on relationships that are actually supported by the
-data.
+Explain the most important relationships.
+
+Examples:
+
+TLT falling
+→ potential duration pressure
+→ possible implications for expensive growth stocks.
+
+USO rising
+→ potential energy/inflation pressure
+→ potential benefit for energy
+→ potential pressure on consumers.
+
+UUP rising
+→ potential multinational headwind
+→ potential emerging-market pressure.
+
+Only use relationships that are actually supported by the
+direction of today's data.
 
 ============================================================
 3. GLOBAL MARKETS
@@ -656,10 +717,13 @@ Analyze:
 - Europe
 - Emerging markets
 
-Explain whether global markets confirm or contradict the
-U.S. session.
+Explain whether international markets:
 
-Discuss relevant read-throughs involving:
+1. confirm the U.S. signal
+2. contradict the U.S. signal
+3. show a separate regional story
+
+Discuss relevant read-throughs to:
 
 - TSM
 - NVDA
@@ -668,6 +732,8 @@ Discuss relevant read-throughs involving:
 - AMZN
 - CAT
 - XOM
+
+Explain why these relationships matter.
 
 ============================================================
 4. MACRO FACTORS
@@ -683,8 +749,11 @@ COMMODITIES
 
 GLOBAL RISK
 
-For rates, discuss implications for:
+For INTEREST RATES:
 
+Use TLT only as a proxy.
+
+Discuss implications for:
 - technology
 - growth
 - banks
@@ -693,79 +762,113 @@ For rates, discuss implications for:
 - industrials
 - valuation
 
-For the dollar, discuss:
+For DOLLAR:
 
+Use UUP only as a proxy.
+
+Discuss implications for:
 - multinationals
 - emerging markets
 - commodities
 - financial conditions
 
-For commodities, focus on:
+For COMMODITIES:
 
-- oil
-- gold
+Use GLD and USO.
+
+Discuss:
 - XOM
 - CAT
 - consumers
-- inflation implications
+- inflation sensitivity
+- risk appetite
 
-For global risk, classify conditions as:
+For GLOBAL RISK:
 
-- Risk-on
-- Risk-off
-- Rotation
-- Mixed
+Classify the evidence as:
+- risk-on
+- risk-off
+- rotation
+- mixed
 
-Only choose a regime when supported by the supplied evidence.
+Explain why.
 
 ============================================================
 5. LARGE-CAP STOCKS TO WATCH
 ============================================================
 
-From the 21-stock watchlist, select approximately 5–7 names.
+Watchlist:
+
+AAPL
+AMZN
+AXP
+AVGO
+CAT
+KO
+CEG
+CRWD
+LLY
+XOM
+GE
+GOOGL
+ISRG
+MSFT
+NU
+NVDA
+PLTR
+TSLA
+TSM
+COST
+V
+
+Select approximately 5-8 names.
 
 Prioritize:
-
 - largest moves
 - unusual moves
 - company-specific news
-- important sector signals
+- sector importance
 - macro sensitivity
 - read-through potential
 
-For each selected stock explain:
+For every selected stock explain:
 
-1. What happened
-2. What is confirmed
-3. What is interpretation/speculation
-4. Why it matters
-5. Potential read-through to another company or sector
+1. What it is doing
+2. What appears to be driving it
+3. Whether that explanation is confirmed or speculative
+4. Why the move matters
+5. Potential read-through to other companies or sectors
 
-Do not invent catalysts.
+Do not discuss all 21 names merely for completeness.
+
+Quality is more important than quantity.
 
 ============================================================
 6. SMALLER / HIGH-BETA MOVERS
 ============================================================
 
-Select 2–4 interesting higher-beta or relatively volatile
-names from the supplied watchlist.
+Select 2-4 interesting higher-beta names from the watchlist.
 
-Focus on:
-
-- percentage moves
-- relative strength/weakness
+Prioritize:
+- large percentage moves
+- relative strength
+- relative weakness
 - risk appetite
 - sector signals
+- unusual behavior
 
-Do not invent a catalyst.
+Do not invent catalysts.
+
+If there is no convincing smaller/high-beta signal,
+say so rather than forcing one.
 
 ============================================================
 7. MACRO → STOCK CONNECTIONS
 ============================================================
 
-Give 3–5 concrete connections.
+Give at least 5 meaningful connections when supported.
 
-Examples include:
+Possible areas include:
 
 Rates → growth valuations
 
@@ -773,17 +876,25 @@ Oil → XOM
 
 Consumer conditions → AXP / V / COST
 
-AI → NVDA / AVGO / TSM / MSFT / GOOGL
+AI investment → NVDA / AVGO / TSM / MSFT / GOOGL
 
-Dollar → multinational earnings
+Dollar → multinational companies
 
 Global risk → TSLA / PLTR / CRWD / NU
 
-Industrial activity → CAT / GE
+Industrial cycle → CAT / GE
 
-Energy → XOM / CEG
+Energy prices → XOM / CEG
 
-Use today's actual data.
+For each connection:
+
+MARKET DATA
+→ MACRO INTERPRETATION
+→ SECTOR EFFECT
+→ COMPANY EFFECT
+→ INVESTOR IMPLICATION
+
+Do not force relationships that today's data does not support.
 
 ============================================================
 8. INVESTOR TAKEAWAY
@@ -791,38 +902,27 @@ Use today's actual data.
 
 This is the most important section.
 
-Give 5–7 concise bullets answering:
+Give 5-8 concise bullets answering:
 
-- What is the market regime?
+- What is today's market regime?
 - Who is leading?
 - Who is lagging?
-- What is the biggest macro factor?
+- What is the biggest macro signal?
 - What is the most important stock signal?
 - What is the biggest risk?
 - What would invalidate today's interpretation?
+- What deserves the most attention next?
 
-If I only read this section, I should understand the market.
+If I only read this section, I should understand the day's
+market.
 
 ============================================================
 9. FINAL SECTION
 ============================================================
 
-For PREMARKET:
+{section_9_instruction}
 
-9. WHAT TO WATCH AT THE OPEN
-
-Give 4–6 specific things to monitor at the open.
-
-For CLOSE:
-
-9. WHAT MATTERS FOR TOMORROW
-
-Give 4–6 specific things to monitor tomorrow.
-
-For each item explain WHY it matters.
-
-These are research observations, not personalized financial
-advice.
+These are research observations, NOT personalized financial advice.
 
 ============================================================
 ANALYTICAL STANDARD
@@ -830,9 +930,9 @@ ANALYTICAL STANDARD
 
 Think like an equity research analyst.
 
-Do not simply summarize headlines.
+Do not merely summarize headlines.
 
-Use this framework:
+Continuously connect:
 
 MARKET MOVE
 → MACRO
@@ -840,9 +940,15 @@ MARKET MOVE
 → COMPANY
 → INVESTOR IMPLICATION
 
-Only make a connection when supported by the supplied data.
+A strong sentence looks like:
 
-Do not manufacture certainty.
+"Small caps declined alongside the major U.S. indices while
+long-duration Treasury proxies also weakened. That combination
+does not provide clean evidence of broad risk-on rotation;
+instead, it suggests a more mixed session in which equity
+weakness occurred alongside continued duration pressure."
+
+Only make conclusions supported by the supplied data.
 
 ============================================================
 DATA: U.S. MARKETS
@@ -869,55 +975,53 @@ DATA: RECENT MARKET NEWS
 {news_block}
 
 ============================================================
-FINAL OUTPUT REQUIREMENT
+FINAL OUTPUT RULE
 ============================================================
 
 Complete all nine sections.
 
-Target approximately 1,800–2,500 words.
+Do not stop halfway through.
 
-Do not stop early.
+Do not output commentary about these instructions.
 
-Do not fabricate missing information.
+Do not mention token limits.
 
-Do not add a separate introduction before section 1.
+Do not say that you are unable to complete the report.
 
-End after section 9.
+Produce the actual market report.
 """
 
 
 # ============================================================
-# EXTRACT TEXT FROM CLAUDE RESPONSE
+# EXTRACT CLAUDE TEXT
 # ============================================================
 
-def extract_text(data):
+def extract_claude_text(data):
 
-    blocks = []
+    blocks = data.get("content", [])
 
-    for block in data.get("content", []):
+    text_blocks = []
+
+    for block in blocks:
 
         if block.get("type") != "text":
             continue
 
-        text = (
+        text = str(
             block.get("text", "")
-            .strip()
-        )
+        ).strip()
 
         if text:
-            blocks.append(text)
+            text_blocks.append(text)
 
-    return "\n\n".join(blocks).strip()
+    return "\n\n".join(text_blocks).strip()
 
 
 # ============================================================
 # CALL CLAUDE
 # ============================================================
 
-def call_claude(
-    prompt,
-    api_key,
-):
+def call_claude(prompt, api_key):
 
     url = "https://api.anthropic.com/v1/messages"
 
@@ -927,244 +1031,248 @@ def call_claude(
         "content-type": "application/json",
     }
 
-    messages = [
-        {
-            "role": "user",
-            "content": prompt,
-        }
-    ]
+    last_error = None
 
-    accumulated_text = ""
+    for attempt in range(1, 4):
 
-    for round_number in range(
-        MAX_CONTINUATIONS + 1
-    ):
-
-        print(
-            f"Calling Claude "
-            f"(generation round "
-            f"{round_number + 1}/"
-            f"{MAX_CONTINUATIONS + 1})..."
-        )
-
-        payload = {
-            "model": CLAUDE_MODEL,
-            "max_tokens": CLAUDE_MAX_TOKENS,
-            "messages": messages,
-        }
-
-        last_error = None
-
-        for attempt in range(1, 4):
-
-            try:
-
-                response = SESSION.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=REQUEST_TIMEOUT_CLAUDE,
-                )
-
-                print(
-                    f"Claude status: "
-                    f"{response.status_code}"
-                )
-
-                if not response.ok:
-
-                    print(
-                        "Claude API error:"
-                    )
-
-                    print(
-                        response.text[:4000]
-                    )
-
-                    response.raise_for_status()
-
-                data = response.json()
-
-                text = extract_text(data)
-
-                stop_reason = data.get(
-                    "stop_reason"
-                )
-
-                print(
-                    f"Claude response length: "
-                    f"{len(text)} characters"
-                )
-
-                print(
-                    f"Claude stop reason: "
-                    f"{stop_reason}"
-                )
-
-                if not text:
-
-                    raise RuntimeError(
-                        "Claude returned no text."
-                    )
-
-                accumulated_text += (
-                    ("\n\n" if accumulated_text else "")
-                    + text
-                )
-
-                # Preserve the assistant response so the next
-                # request can continue the same conversation.
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": data.get(
-                            "content",
-                            [],
-                        ),
-                    }
-                )
-
-                # Normal completion.
-                if stop_reason != "max_tokens":
-
-                    return accumulated_text.strip()
-
-                # Claude hit the output limit.
-                # Ask it to continue rather than restarting.
-                if round_number < MAX_CONTINUATIONS:
-
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Continue exactly where you stopped. "
-                                "Do not repeat any completed section. "
-                                "Complete the remaining required sections, "
-                                "especially sections 8 and 9. "
-                                "Keep the same report style and factual "
-                                "constraints. End after section 9."
-                            ),
-                        }
-                    )
-
-                    break
-
-                return accumulated_text.strip()
-
-            except Exception as exc:
-
-                last_error = exc
-
-                print(
-                    f"Claude request attempt "
-                    f"{attempt} failed: {exc}"
-                )
-
-                if attempt < 3:
-
-                    time.sleep(attempt * 8)
-
-        else:
-
-            raise RuntimeError(
-                "Claude request failed after retries: "
-                f"{last_error}"
+        try:
+            print(
+                f"Calling Claude "
+                f"(attempt {attempt}/3)..."
             )
 
-    return accumulated_text.strip()
+            response = requests.post(
+                url,
+                headers=headers,
+                json={
+                    "model": CLAUDE_MODEL,
+                    "max_tokens": CLAUDE_MAX_TOKENS,
+                    "temperature": 0.2,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                },
+                timeout=CLAUDE_TIMEOUT,
+            )
+
+            print(
+                f"Claude status: "
+                f"{response.status_code}"
+            )
+
+            if not response.ok:
+
+                print("Claude API error:")
+                print(response.text[:3000])
+
+                response.raise_for_status()
+
+            data = response.json()
+
+            text = extract_claude_text(data)
+
+            stop_reason = data.get(
+                "stop_reason"
+            )
+
+            print(
+                f"Claude response length: "
+                f"{len(text)} characters"
+            )
+
+            print(
+                f"Claude stop reason: "
+                f"{stop_reason}"
+            )
+
+            if not text:
+                raise ValueError(
+                    "Claude returned an empty response."
+                )
+
+            # ------------------------------------------------
+            # IMPORTANT:
+            # If Claude hit max_tokens, continue the report
+            # instead of treating the truncated report as final.
+            # ------------------------------------------------
+
+            if stop_reason == "max_tokens":
+
+                print(
+                    "Claude reached the output limit. "
+                    "Requesting continuation..."
+                )
+
+                continuation_prompt = f"""
+Continue the market report below.
+
+The previous response was cut off before completion.
+
+DO NOT restart the report.
+
+DO NOT repeat sections already completed.
+
+Continue exactly from where the previous response stopped.
+
+You MUST finish any incomplete section and then complete
+all remaining required sections through:
+
+9. WHAT TO WATCH AT THE OPEN
+
+or:
+
+9. WHAT MATTERS FOR TOMORROW
+
+depending on the original report mode.
+
+Use only the original supplied data.
+
+Previous report:
+
+{text}
+"""
+
+                continuation_response = requests.post(
+                    url,
+                    headers=headers,
+                    json={
+                        "model": CLAUDE_MODEL,
+                        "max_tokens": CLAUDE_CONTINUATION_TOKENS,
+                        "temperature": 0.2,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": continuation_prompt,
+                            }
+                        ],
+                    },
+                    timeout=CLAUDE_TIMEOUT,
+                )
+
+                if continuation_response.ok:
+
+                    continuation_data = (
+                        continuation_response.json()
+                    )
+
+                    continuation_text = (
+                        extract_claude_text(
+                            continuation_data
+                        )
+                    )
+
+                    if continuation_text:
+
+                        text = (
+                            text
+                            + "\n\n"
+                            + continuation_text
+                        )
+
+                        print(
+                            "Claude continuation received."
+                        )
+
+                else:
+
+                    print(
+                        "Claude continuation failed; "
+                        "using original response."
+                    )
+
+            return text
+
+        except Exception as exc:
+
+            last_error = exc
+
+            print(
+                f"Claude attempt {attempt} failed: "
+                f"{exc}"
+            )
+
+            if attempt < 3:
+
+                wait_seconds = attempt * 10
+
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
+
+    raise RuntimeError(
+        "Claude failed after 3 attempts: "
+        f"{last_error}"
+    )
 
 
 # ============================================================
-# VALIDATION
+# VALIDATE BRIEF
 # ============================================================
 
-def missing_sections(brief_text, mode):
+def validate_brief(brief_text, mode):
 
-    required = [
+    required_sections = [
         "1. WHAT MATTERS TODAY",
         "2. MARKET DASHBOARD",
         "3. GLOBAL MARKETS",
         "4. MACRO FACTORS",
         "5. LARGE-CAP STOCKS TO WATCH",
         "6. SMALLER / HIGH-BETA MOVERS",
-        "7. MACRO",
+        "7. MACRO → STOCK CONNECTIONS",
         "8. INVESTOR TAKEAWAY",
     ]
 
+    if mode == "premarket":
+        final_heading = (
+            "9. WHAT TO WATCH AT THE OPEN"
+        )
+    else:
+        final_heading = (
+            "9. WHAT MATTERS FOR TOMORROW"
+        )
+
     missing = []
 
-    upper_text = brief_text.upper()
+    normalized = brief_text.upper()
 
-    for section in required:
+    for section in required_sections:
 
-        if section.upper() not in upper_text:
-
-            # Section 7 accepts the longer heading.
-            if (
-                section == "7. MACRO"
-                and "7. MACRO → STOCK CONNECTIONS"
-                in upper_text
-            ):
-                continue
-
+        if section.upper() not in normalized:
             missing.append(section)
 
-    if mode == "premarket":
-
-        if (
-            "9. WHAT TO WATCH AT THE OPEN"
-            not in upper_text
-        ):
-            missing.append(
-                "9. WHAT TO WATCH AT THE OPEN"
-            )
-
-    else:
-
-        if (
-            "9. WHAT MATTERS FOR TOMORROW"
-            not in upper_text
-        ):
-            missing.append(
-                "9. WHAT MATTERS FOR TOMORROW"
-            )
-
-    return missing
-
-
-def validate_brief(
-    brief_text,
-    mode,
-):
-
-    missing = missing_sections(
-        brief_text,
-        mode,
-    )
+    if final_heading.upper() not in normalized:
+        missing.append(final_heading)
 
     if missing:
-
-        raise ValueError(
-            "Market brief failed validation. "
-            f"Missing: {', '.join(missing)}"
+        print(
+            "Brief validation failed."
         )
 
-    # Prevent obviously broken output from being emailed.
-    if len(brief_text.strip()) < 5000:
-
-        raise ValueError(
-            "Market brief is suspiciously short: "
-            f"{len(brief_text)} characters."
+        print(
+            "Missing sections:"
         )
+
+        for item in missing:
+            print(f"  - {item}")
+
+        return False
 
     print(
         "Brief validation passed: "
-        "all required sections detected."
+        "all 9 sections detected."
     )
+
+    return True
 
 
 # ============================================================
-# REPAIR INCOMPLETE REPORT
+# REPAIR INCOMPLETE BRIEF
 # ============================================================
 
 def repair_brief(
@@ -1173,256 +1281,62 @@ def repair_brief(
     api_key,
 ):
 
-    missing = missing_sections(
-        brief_text,
-        mode,
-    )
-
-    if not missing:
-
-        return brief_text
-
-    print(
-        "Attempting report repair."
-    )
-
-    print(
-        "Missing sections: "
-        + ", ".join(missing)
-    )
-
-    final_heading = (
-        "9. WHAT TO WATCH AT THE OPEN"
-        if mode == "premarket"
-        else "9. WHAT MATTERS FOR TOMORROW"
-    )
-
-    prompt = f"""
-The market report below is incomplete.
-
-Missing sections:
-
-{chr(10).join(missing)}
-
-Complete ONLY the missing sections.
-
-Do not rewrite completed sections.
-
-Do not repeat material already present.
-
-Use only the facts and numbers already contained in the
-original report.
-
-Do not invent information.
-
-The final required section is:
-
-{final_heading}
-
-Return the missing sections in their exact numbered-heading
-format.
-
-ORIGINAL REPORT:
-
-{brief_text}
-"""
-
-    url = "https://api.anthropic.com/v1/messages"
-
-    response = SESSION.post(
-        url,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": CLAUDE_MODEL,
-            "max_tokens": 6000,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-        },
-        timeout=REQUEST_TIMEOUT_CLAUDE,
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    repair_text = extract_text(data)
-
-    if not repair_text:
-
-        raise RuntimeError(
-            "Claude repair call returned no text."
-        )
-
-    repaired = (
-        brief_text.rstrip()
-        + "\n\n"
-        + repair_text.strip()
-    )
-
-    return repaired
-
-
-# ============================================================
-# FALLBACK REPORT
-# ============================================================
-
-def build_fallback_report(
-    mode,
-    index_quotes,
-    macro_quotes,
-    watch_quotes,
-    news,
-):
-
     if mode == "premarket":
-
         final_heading = (
             "9. WHAT TO WATCH AT THE OPEN"
         )
-
     else:
-
         final_heading = (
             "9. WHAT MATTERS FOR TOMORROW"
         )
 
-    index_block, macro_block, watch_block = (
-        build_market_data(
-            index_quotes,
-            macro_quotes,
-            watch_quotes,
-        )
+    print(
+        "Attempting one report-repair pass..."
     )
 
-    top_movers = sorted(
-        watch_quotes,
-        key=lambda q: (
-            abs(q.get("change_pct") or 0)
-        ),
-        reverse=True,
-    )[:6]
+    prompt = f"""
+You are repairing an incomplete institutional market report.
 
-    mover_lines = []
+Below is a report that was generated but failed structural
+validation.
 
-    for quote in top_movers:
+DO NOT rewrite sections that are already present.
 
-        mover_lines.append(
-            f"- {fmt(quote)}"
-        )
+DO NOT invent new market facts.
 
-    return f"""
+Preserve all existing factual statements.
+
+Your job is to produce a final complete report containing
+all nine required sections.
+
+Required headings:
+
 1. WHAT MATTERS TODAY
-
-Automated fallback report. Claude analysis was unavailable,
-so this report contains the verified market data collected
-by the system without additional interpretation.
-
-U.S. market data:
-
-{index_block}
-
-
 2. MARKET DASHBOARD
-
-Macro and global proxies:
-
-{macro_block}
-
-
 3. GLOBAL MARKETS
-
-The supplied global-market proxies are shown below.
-
-{macro_block}
-
-Company watchlist read-through data is available in the
-stock section below.
-
-
 4. MACRO FACTORS
-
-Interest rates:
-
-TLT is the supplied proxy for long-duration U.S. Treasury
-prices. No Treasury yield has been inferred.
-
-Dollar:
-
-UUP is the supplied U.S. dollar ETF proxy.
-
-Commodities:
-
-GLD and USO are the supplied gold and oil proxies.
-
-Global risk:
-
-The available data should be interpreted directly from the
-reported price changes rather than from an invented macro
-narrative.
-
-
 5. LARGE-CAP STOCKS TO WATCH
-
-Largest absolute percentage moves among the supplied
-watchlist:
-
-{chr(10).join(mover_lines)}
-
-
 6. SMALLER / HIGH-BETA MOVERS
-
-The watchlist contains several higher-beta names. The system
-does not infer a catalyst without supporting news.
-
-The largest supplied moves are:
-
-{chr(10).join(mover_lines)}
-
-
 7. MACRO → STOCK CONNECTIONS
-
-- Oil proxy performance can be compared with XOM.
-- Treasury proxy performance can be compared with
-  duration-sensitive growth stocks.
-- Dollar proxy performance can be compared with
-  multinational and emerging-market exposure.
-- Global equity proxies can be compared with TSM and other
-  internationally exposed companies.
-
-
 8. INVESTOR TAKEAWAY
-
-- The report contains verified market data but no AI-generated
-  interpretation.
-- The strongest and weakest index moves are visible above.
-- The strongest individual stock moves are listed above.
-- Oil, gold, Treasury and dollar proxies provide the main
-  supplied macro signals.
-- Company-specific catalysts should not be assumed without
-  supporting news.
-- A subsequent report should review whether today's moves
-  persist or reverse.
-
-
 {final_heading}
 
-- Monitor whether the major U.S. index leadership persists.
-- Monitor small-cap participation through IWM.
-- Monitor TLT for changes in duration conditions.
-- Monitor UUP for dollar confirmation.
-- Monitor USO for commodity pressure.
-- Monitor the largest individual stock movers for follow-through.
+If a section is genuinely unsupported by the supplied data,
+write "Data unavailable" rather than inventing information.
 
-Research observations only; not personalized financial advice.
+Return ONLY the repaired report.
+
+REPORT TO REPAIR:
+
+{brief_text}
 """
+
+    repaired = call_claude(
+        prompt,
+        api_key,
+    )
+
+    return repaired
 
 
 # ============================================================
@@ -1435,29 +1349,33 @@ def send_email(
     to_addr,
 ):
 
-    gmail_address = get_required_env(
+    gmail_address = require_env(
         "GMAIL_ADDRESS"
     )
 
-    gmail_app_password = get_required_env(
+    gmail_app_password = require_env(
         "GMAIL_APP_PASSWORD"
     )
 
     if not body_text.strip():
-
         raise ValueError(
             "Refusing to send an empty email."
         )
 
-    msg = MIMEText(
+    print(
+        f"Email body length: "
+        f"{len(body_text)} characters"
+    )
+
+    message = MIMEText(
         body_text,
         "plain",
         "utf-8",
     )
 
-    msg["From"] = gmail_address
-    msg["To"] = to_addr
-    msg["Subject"] = subject
+    message["From"] = gmail_address
+    message["To"] = to_addr
+    message["Subject"] = subject
 
     last_error = None
 
@@ -1473,7 +1391,7 @@ def send_email(
             with smtplib.SMTP(
                 "smtp.gmail.com",
                 587,
-                timeout=REQUEST_TIMEOUT_SMTP,
+                timeout=SMTP_TIMEOUT,
             ) as server:
 
                 server.ehlo()
@@ -1490,7 +1408,7 @@ def send_email(
                 server.sendmail(
                     gmail_address,
                     [to_addr],
-                    msg.as_string(),
+                    message.as_string(),
                 )
 
             print(
@@ -1510,7 +1428,14 @@ def send_email(
 
             if attempt < 3:
 
-                time.sleep(attempt * 10)
+                wait_seconds = attempt * 10
+
+                print(
+                    f"Waiting {wait_seconds} seconds "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
 
     raise RuntimeError(
         "Gmail failed after 3 attempts: "
@@ -1523,6 +1448,10 @@ def send_email(
 # ============================================================
 
 def main():
+
+    # --------------------------------------------------------
+    # MODE
+    # --------------------------------------------------------
 
     mode = (
         sys.argv[1]
@@ -1545,14 +1474,17 @@ def main():
     print("")
     print("=" * 70)
 
-    print(
-        "RUNNING "
-        + (
-            "PREMARKET MARKET BRIEF"
-            if mode == "premarket"
-            else "MARKET CLOSE BRIEF"
+    if mode == "premarket":
+
+        print(
+            "RUNNING PREMARKET MARKET BRIEF"
         )
-    )
+
+    else:
+
+        print(
+            "RUNNING MARKET CLOSE BRIEF"
+        )
 
     print("=" * 70)
     print("")
@@ -1561,15 +1493,15 @@ def main():
     # API KEYS
     # --------------------------------------------------------
 
-    finnhub_key = get_required_env(
+    finnhub_key = require_env(
         "FINNHUB_API_KEY"
     )
 
-    anthropic_key = get_required_env(
+    anthropic_key = require_env(
         "ANTHROPIC_API_KEY"
     )
 
-    email_to = get_required_env(
+    email_to = require_env(
         "EMAIL_TO"
     )
 
@@ -1587,12 +1519,14 @@ def main():
     # ALL SYMBOLS
     # --------------------------------------------------------
 
+    all_symbols = (
+        INDEX_SYMS
+        + list(MACRO_PROXIES.keys())
+        + watchlist
+    )
+
     all_symbols = list(
-        dict.fromkeys(
-            INDEX_SYMS
-            + list(MACRO_PROXIES.keys())
-            + watchlist
-        )
+        dict.fromkeys(all_symbols)
     )
 
     # --------------------------------------------------------
@@ -1602,7 +1536,9 @@ def main():
     quotes = {}
 
     print("")
-    print("Fetching market data...")
+    print(
+        "Fetching market data..."
+    )
 
     for symbol in all_symbols:
 
@@ -1620,13 +1556,12 @@ def main():
 
         except Exception as exc:
 
+            # One bad symbol should NEVER kill the entire report.
             print(
-                f"Quote failed for "
-                f"{symbol}: {exc}"
+                f"Quote failed for {symbol}: "
+                f"{exc}"
             )
 
-            # Do not kill the entire report because one
-            # ticker failed.
             quotes[symbol] = {
                 "symbol": symbol,
                 "price": None,
@@ -1640,7 +1575,9 @@ def main():
     # --------------------------------------------------------
 
     print("")
-    print("Fetching market news...")
+    print(
+        "Fetching market news..."
+    )
 
     try:
 
@@ -1659,6 +1596,7 @@ def main():
             f"News fetch failed: {exc}"
         )
 
+        # News failure should NOT kill the market brief.
         news = []
 
     # --------------------------------------------------------
@@ -1685,7 +1623,9 @@ def main():
     # --------------------------------------------------------
 
     print("")
-    print("Building analyst prompt...")
+    print(
+        "Building analyst prompt..."
+    )
 
     prompt = build_prompt(
         mode,
@@ -1705,114 +1645,52 @@ def main():
     # --------------------------------------------------------
 
     print("")
-    print("Generating market brief...")
+    print(
+        "Generating market brief..."
+    )
 
-    try:
+    brief_text = call_claude(
+        prompt,
+        anthropic_key,
+    )
 
-        brief_text = call_claude(
-            prompt,
+    # --------------------------------------------------------
+    # VALIDATE
+    # --------------------------------------------------------
+
+    valid = validate_brief(
+        brief_text,
+        mode,
+    )
+
+    # --------------------------------------------------------
+    # REPAIR ONCE IF NECESSARY
+    # --------------------------------------------------------
+
+    if not valid:
+
+        brief_text = repair_brief(
+            brief_text,
+            mode,
             anthropic_key,
         )
 
-    except Exception as exc:
-
-        print(
-            f"Claude generation failed: {exc}"
-        )
-
-        print(
-            "Building verified-data fallback report..."
-        )
-
-        brief_text = build_fallback_report(
-            mode,
-            index_quotes,
-            macro_quotes,
-            watch_quotes,
-            news,
-        )
-
-    # --------------------------------------------------------
-    # VALIDATE / REPAIR
-    # --------------------------------------------------------
-
-    try:
-
-        validate_brief(
+        valid = validate_brief(
             brief_text,
             mode,
         )
 
-    except ValueError as validation_error:
+    # --------------------------------------------------------
+    # FAIL SAFE
+    # --------------------------------------------------------
 
-        print(
-            f"Initial validation failed: "
-            f"{validation_error}"
+    if not valid:
+
+        raise RuntimeError(
+            "Claude produced an incomplete market brief "
+            "after generation and repair attempts. "
+            "Email was NOT sent."
         )
-
-        repaired = False
-
-        for attempt in range(
-            1,
-            MAX_REPAIR_ATTEMPTS + 1,
-        ):
-
-            try:
-
-                print(
-                    f"Repair attempt "
-                    f"{attempt}/"
-                    f"{MAX_REPAIR_ATTEMPTS}..."
-                )
-
-                brief_text = repair_brief(
-                    brief_text,
-                    mode,
-                    anthropic_key,
-                )
-
-                validate_brief(
-                    brief_text,
-                    mode,
-                )
-
-                repaired = True
-
-                print(
-                    "Report successfully repaired."
-                )
-
-                break
-
-            except Exception as repair_error:
-
-                print(
-                    f"Repair failed: "
-                    f"{repair_error}"
-                )
-
-        if not repaired:
-
-            print(
-                "AI report could not be repaired."
-            )
-
-            print(
-                "Using verified-data fallback report."
-            )
-
-            brief_text = build_fallback_report(
-                mode,
-                index_quotes,
-                macro_quotes,
-                watch_quotes,
-                news,
-            )
-
-            validate_brief(
-                brief_text,
-                mode,
-            )
 
     # --------------------------------------------------------
     # PRINT REPORT
@@ -1820,7 +1698,9 @@ def main():
 
     print("")
     print("=" * 70)
-    print("MARKET BRIEF")
+    print(
+        "CLAUDE MARKET BRIEF"
+    )
     print("=" * 70)
 
     print(brief_text)
@@ -1837,7 +1717,7 @@ def main():
             timezone.utc
         )
         .astimezone()
-        .strftime("%a %b %d")
+        .strftime("%a %b %d, %Y")
     )
 
     # --------------------------------------------------------
@@ -1872,12 +1752,10 @@ def main():
 
     print("")
     print("=" * 70)
-
     print(
         f"SUCCESS: Market brief sent to "
         f"{email_to}"
     )
-
     print("=" * 70)
 
 
@@ -1887,4 +1765,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```

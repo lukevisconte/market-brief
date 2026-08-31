@@ -552,7 +552,7 @@ consistent with pressure from higher long-term yields."
 REQUIRED STRUCTURE
 ============================================================
 
-You MUST complete ALL nine sections.
+You MUST complete ALL seven sections.
 
 Do not stop after section 1.
 
@@ -560,7 +560,7 @@ Do not stop after section 2.
 
 Do not stop after section 5.
 
-Continue all the way through section 9.
+Continue all the way through section 7.
 
 Use these exact headings:
 
@@ -576,9 +576,7 @@ Use these exact headings:
 
 6. SMALLER / HIGH-BETA MOVERS
 
-7. MACRO → STOCK CONNECTIONS
-
-8. INVESTOR TAKEAWAY
+7. INVESTOR TAKEAWAY
 
 {final_heading}
 
@@ -1034,7 +1032,7 @@ def call_claude(
                 },
                 json={
                     "model": "claude-sonnet-5",
-                    "max_tokens":10000,
+                    "max_tokens":16000,
                     "messages": [
                         {
                             "role": "user",
@@ -1139,8 +1137,7 @@ def validate_brief(brief_text):
         "4. MACRO FACTORS",
         "5. LARGE-CAP STOCKS TO WATCH",
         "6. SMALLER / HIGH-BETA MOVERS",
-        "7. MACRO",
-        "8. INVESTOR TAKEAWAY",
+        "7. INVESTOR TAKEAWAY",
     ]
 
     missing = []

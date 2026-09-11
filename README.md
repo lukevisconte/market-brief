@@ -1,9 +1,6 @@
 # Trading day brief
 
-Runs on a schedule via GitHub Actions: pulls index + watchlist quotes and
-news from Finnhub, has Claude write a short briefing, and emails it to you
-(or to an email-to-SMS gateway address, so it lands as a text).
-
+An automated creation engine--running twice daily at prior to market open, and after market close--that pulls: index prices, watchlist quotes, and news, all from Finnhub, and has Claude write a short briefing at forwards directly to your email to keep you informed on micro-macro market trends for the day.
 ## Setup
 
 1. Create a new GitHub repo and add these three files (`main.py`,

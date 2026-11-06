@@ -13,117 +13,85 @@ on:
           - close
 
   schedule:
-    # Premarket: 9:00 AM Eastern Time
-    # 13:00 UTC during daylight saving time
+    # GitHub cron uses UTC. Each pair covers both Eastern time offsets;
+    # the mode step below runs only the trigger matching New York DST.
     - cron: "0 13 * * 1-5"
-
-    # Close: 4:15 PM Eastern Time
-    # 20:15 UTC during daylight saving time
+    - cron: "0 14 * * 1-5"
     - cron: "15 20 * * 1-5"
+    - cron: "15 21 * * 1-5"
+
+concurrency:
+  group: market-brief-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-
-  # ==========================================================
-  # PREMARKET
-  # ==========================================================
-
-  premarket:
-    if: >
-      github.event_name == 'schedule' &&
-      github.event.schedule == '0 13 * * 1-5'
-
+  brief:
     runs-on: ubuntu-latest
-
     steps:
+      - name: Select the single scheduled run
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+          INPUT_MODE: ${{ github.event.inputs.mode }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
 
-      - name: Checkout repository
+          event_name = os.environ["EVENT_NAME"]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          if event_name == "workflow_dispatch":
+              mode = os.environ.get("INPUT_MODE", "")
+              if mode not in {"premarket", "close"}:
+                  raise SystemExit("Invalid manual mode.")
+              with open(output_path, "a") as output:
+                  output.write(f"mode={mode}\n")
+                  output.write("run=true\n")
+              raise SystemExit(0)
+
+          schedule = os.environ.get("EVENT_SCHEDULE", "")
+          daylight = datetime.now(ZoneInfo("America/New_York")).dst() != timedelta(0)
+          selected = {
+              "0 13 * * 1-5": ("premarket", True),
+              "0 14 * * 1-5": ("premarket", False),
+              "15 20 * * 1-5": ("close", True),
+              "15 21 * * 1-5": ("close", False),
+          }.get(schedule)
+          if selected is None or selected[1] != daylight:
+              print(f"Skipping non-local-time trigger: {schedule}")
+              with open(output_path, "a") as output:
+                  output.write("run=false\n")
+              raise SystemExit(0)
+
+          mode = selected[0]
+          with open(output_path, "a") as output:
+              output.write(f"mode={mode}\n")
+              output.write("run=true\n")
+          print(f"Running {mode} brief for America/New_York.")
+          PY
+
+      - name: Check out repository
+        if: steps.mode.outputs.run == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.mode.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install requests
+        if: steps.mode.outputs.run == 'true'
+        run: pip install -r requirements.txt
 
-      - name: Run premarket brief
+      - name: Run market brief
+        if: steps.mode.outputs.run == 'true'
         env:
           FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-        run: |
-          python main.py premarket
-
-
-  # ==========================================================
-  # CLOSE
-  # ==========================================================
-
-  close:
-    if: >
-      github.event_name == 'schedule' &&
-      github.event.schedule == '15 20 * * 1-5'
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          pip install requests
-
-      - name: Run close brief
-        env:
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-        run: |
-          python main.py close
-
-
-  # ==========================================================
-  # MANUAL RUN
-  # ==========================================================
-
-  manual:
-    if: github.event_name == 'workflow_dispatch'
-
-    runs-on: ubuntu-latest
-
-    steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          pip install requests
-
-      - name: Run selected brief
-        env:
-          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
-          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-        run: |
-          python main.py ${{ github.event.inputs.mode }}
+        run: python main.py "${{ steps.mode.outputs.mode }}"

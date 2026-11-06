@@ -1,0 +1,71 @@
+sources:
+  wsj:
+    name: Wall Street Journal
+    enabled: true
+    feeds:
+      - https://feeds.a.dj.com/rss/RSSMarketsMain.xml
+  financial_times:
+    name: Financial Times
+    enabled: true
+    feeds:
+      - https://www.ft.com/rss/home
+  economist:
+    name: The Economist
+    enabled: true
+    feeds:
+      - https://www.economist.com/finance-and-economics/rss.xml
+  barrons:
+    name: Barron's
+    enabled: true
+    feeds:
+      - https://feeds.a.dj.com/rss/RSSBarrons.xml
+  reuters:
+    name: Reuters
+    enabled: true
+    feeds:
+      - https://feeds.reuters.com/reuters/businessNews
+  bloomberg:
+    name: Bloomberg
+    enabled: true
+    feeds:
+      - https://feeds.bloomberg.com/markets/news.rss
+  cnbc:
+    name: CNBC
+    enabled: true
+    feeds:
+      - https://www.cnbc.com/id/100003114/device/rss/rss.html
+  marketwatch:
+    name: MarketWatch
+    enabled: true
+    feeds:
+      - https://feeds.marketwatch.com/marketwatch/topstories/
+  yahoo_finance:
+    name: Yahoo Finance
+    enabled: true
+    feeds:
+      - https://finance.yahoo.com/news/rssindex
+  federal_reserve:
+    name: Federal Reserve
+    enabled: true
+    feeds:
+      - https://www.federalreserve.gov/feeds/press_all.xml
+  treasury:
+    name: U.S. Treasury
+    enabled: true
+    feeds:
+      - https://home.treasury.gov/news/press-releases/feed
+  bls:
+    name: BLS
+    enabled: true
+    feeds:
+      - https://www.bls.gov/feed/bls_latest.rss
+  bea:
+    name: BEA
+    enabled: true
+    feeds:
+      - https://www.bea.gov/news/blog/feed
+  sec:
+    name: SEC
+    enabled: true
+    feeds:
+      - https://www.sec.gov/news/pressreleases.rss

@@ -1,51 +1,26 @@
+"""Build and email a twice-daily market brief."""
+
+from __future__ import annotations
+
+import json
 import os
-import sys
 import smtplib
+import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from email.mime.text import MIMEText
+from zoneinfo import ZoneInfo
 
 import requests
 
+from news import build_research_packet, fetch_configured_news, normalize_article
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-
-CLAUDE_MODEL = "claude-sonnet-5"
-
-# Large enough for a substantive report, but intentionally
-# constrained so Claude does not wander into a 15,000+ token essay.
-CLAUDE_MAX_TOKENS = 9000
-
-# If Claude gets cut off, make one continuation attempt.
-CLAUDE_CONTINUATION_TOKENS = 5000
-
+MODEL = "claude-sonnet-5"
+FINNHUB_TIMEOUT = 20
+CLAUDE_TIMEOUT = 300
 NEWS_LIMIT = 25
-NEWS_SUMMARY_LIMIT = 600
-
-HTTP_TIMEOUT = 20
-CLAUDE_TIMEOUT = 180
-SMTP_TIMEOUT = 30
-
-
-# ============================================================
-# U.S. MARKET INDICES
-# ============================================================
-
-INDEX_SYMS = [
-    "SPY",
-    "QQQ",
-    "DIA",
-    "IWM",
-]
-
-
-# ============================================================
-# MACRO / GLOBAL MARKET PROXIES
-# ============================================================
-
-MACRO_PROXIES = {
+INDICES = ["SPY", "QQQ", "DIA", "IWM"]
+PROXIES = {
     "GLD": "Gold",
     "USO": "Oil",
     "TLT": "Long-term U.S. Treasuries",
@@ -56,12 +31,6 @@ MACRO_PROXIES = {
     "EWU": "United Kingdom equities",
     "EEM": "Emerging markets",
 }
-
-
-# ============================================================
-# STOCK WATCHLIST
-# ============================================================
-
 WATCHLIST = {
     "AAPL": "Apple",
     "AMZN": "Amazon",
@@ -85,1460 +54,325 @@ WATCHLIST = {
     "COST": "Costco",
     "V": "Visa",
 }
+REQUIRED_SECTIONS = [
+    "1. WHAT MATTERS TODAY",
+    "2. MARKET DASHBOARD",
+    "3. GLOBAL MARKETS",
+    "4. MACRO FACTORS",
+    "5. LARGE-CAP STOCKS TO WATCH",
+    "6. SMALLER / HIGH-BETA MOVERS",
+    "7. MACRO → STOCK CONNECTIONS",
+    "8. INVESTOR TAKEAWAY",
+]
 
 
-# ============================================================
-# HELPERS
-# ============================================================
+def require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Required environment variable {name} is missing.")
+    return value
 
-def require_env(name):
-    value = os.environ.get(name)
 
-    if not value or not value.strip():
-        raise RuntimeError(
-            f"Required environment variable '{name}' is missing."
+def get_watchlist() -> dict[str, str]:
+    configured = os.environ.get("WATCHLIST", "").strip()
+    if not configured:
+        return WATCHLIST.copy()
+    return {
+        symbol: WATCHLIST.get(symbol, symbol)
+        for symbol in dict.fromkeys(
+            item.strip().upper() for item in configured.split(",") if item.strip()
         )
-
-    return value.strip()
-
-
-def get_watchlist():
-    raw = os.environ.get("WATCHLIST", "")
-
-    if raw.strip():
-        symbols = [
-            s.strip().upper()
-            for s in raw.split(",")
-            if s.strip()
-        ]
-
-        # Remove duplicates while preserving order.
-        return list(dict.fromkeys(symbols))
-
-    return list(WATCHLIST.keys())
+    }
 
 
-def safe_float(value):
+def fetch_quote(symbol: str, api_key: str) -> dict:
+    response = _get_with_retries(
+        "https://finnhub.io/api/v1/quote",
+        {"symbol": symbol, "token": api_key},
+    )
+    data = response.json()
+    return {
+        "symbol": symbol,
+        "price": _float(data.get("c")),
+        "change_pct": _float(data.get("dp")),
+        "change": _float(data.get("d")),
+        "previous_close": _float(data.get("pc")),
+    }
+
+
+def fetch_finnhub_news(api_key: str) -> list[dict]:
+    response = _get_with_retries(
+        "https://finnhub.io/api/v1/news",
+        {"category": "general", "token": api_key},
+    )
+    items = response.json()
+    if not isinstance(items, list):
+        raise ValueError("Finnhub news response was not a list.")
+    return [
+        {
+            "source": item.get("source") or "Finnhub",
+            "title": item.get("headline") or "",
+            "url": item.get("url") or f"finnhub:{item.get('headline', '')}",
+            "published_at": item.get("datetime"),
+            "summary": str(item.get("summary") or "")[:600],
+        }
+        for item in items[:NEWS_LIMIT]
+        if item.get("headline")
+    ]
+
+
+def _get_with_retries(url: str, params: dict) -> requests.Response:
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                timeout=FINNHUB_TIMEOUT,
+            )
+            response.raise_for_status()
+            return response
+        except (requests.RequestException, ValueError) as error:
+            last_error = error
+            print(f"Finnhub request attempt {attempt}/3 failed: {error}")
+            if attempt < 3:
+                time.sleep(attempt * 3)
+    raise RuntimeError(f"Finnhub request failed after three attempts: {last_error}")
+
+
+def _float(value):
     try:
-        if value is None:
-            return None
-
-        return float(value)
-
+        return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
 
 
-# ============================================================
-# FETCH QUOTE
-# ============================================================
-
-def fetch_quote(symbol, key):
-    """
-    Fetch a quote from Finnhub.
-
-    Retries transient failures up to 3 times.
-    """
-
-    url = "https://finnhub.io/api/v1/quote"
-
-    last_error = None
-
-    for attempt in range(1, 4):
-
-        try:
-            print(
-                f"Fetching {symbol} "
-                f"(attempt {attempt}/3)..."
-            )
-
-            response = requests.get(
-                url,
-                params={
-                    "symbol": symbol,
-                    "token": key,
-                },
-                timeout=HTTP_TIMEOUT,
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            return {
-                "symbol": symbol,
-                "price": safe_float(data.get("c")),
-                "change_pct": safe_float(data.get("dp")),
-                "change": safe_float(data.get("d")),
-                "previous_close": safe_float(data.get("pc")),
-            }
-
-        except Exception as exc:
-            last_error = exc
-
-            print(
-                f"{symbol} attempt {attempt} failed: {exc}"
-            )
-
-            if attempt < 3:
-                wait_seconds = attempt * 3
-
-                print(
-                    f"Waiting {wait_seconds} seconds "
-                    f"before retry..."
-                )
-
-                time.sleep(wait_seconds)
-
-    raise RuntimeError(
-        f"Failed to fetch {symbol} after 3 attempts: "
-        f"{last_error}"
-    )
-
-
-# ============================================================
-# FETCH NEWS
-# ============================================================
-
-def fetch_news(key, limit=NEWS_LIMIT):
-    """
-    Fetch general market news from Finnhub.
-
-    News is deliberately capped because sending dozens of
-    long summaries to Claude wastes context without improving
-    the report proportionally.
-    """
-
-    url = "https://finnhub.io/api/v1/news"
-
-    last_error = None
-
-    for attempt in range(1, 4):
-
-        try:
-            print(
-                f"Fetching market news "
-                f"(attempt {attempt}/3)..."
-            )
-
-            response = requests.get(
-                url,
-                params={
-                    "category": "general",
-                    "token": key,
-                },
-                timeout=HTTP_TIMEOUT,
-            )
-
-            response.raise_for_status()
-
-            items = response.json()
-
-            if not isinstance(items, list):
-                raise ValueError(
-                    "Finnhub news response was not a list."
-                )
-
-            items = items[:limit]
-
-            cleaned = []
-
-            for item in items:
-
-                headline = str(
-                    item.get("headline") or ""
-                ).strip()
-
-                summary = str(
-                    item.get("summary") or ""
-                ).strip()
-
-                source = str(
-                    item.get("source") or ""
-                ).strip()
-
-                if not headline:
-                    continue
-
-                # Prevent one enormous news summary from
-                # consuming the Claude context window.
-                summary = summary[:NEWS_SUMMARY_LIMIT]
-
-                cleaned.append({
-                    "headline": headline,
-                    "summary": summary,
-                    "source": source,
-                })
-
-            return cleaned
-
-        except Exception as exc:
-            last_error = exc
-
-            print(
-                f"News attempt {attempt} failed: {exc}"
-            )
-
-            if attempt < 3:
-                wait_seconds = attempt * 3
-
-                print(
-                    f"Waiting {wait_seconds} seconds "
-                    f"before retry..."
-                )
-
-                time.sleep(wait_seconds)
-
-    raise RuntimeError(
-        "Failed to fetch market news after 3 attempts: "
-        f"{last_error}"
-    )
-
-
-# ============================================================
-# FORMAT QUOTE
-# ============================================================
-
-def fmt(quote):
+def format_quote(quote: dict) -> str:
     price = quote.get("price")
-    change_pct = quote.get("change_pct")
+    change = quote.get("change_pct")
+    price_text = f"${price:,.2f}" if price is not None else "N/A"
+    change_text = f"{change:+.2f}%" if change is not None else "N/A"
+    return f"{quote['symbol']}: {price_text} ({change_text})"
 
-    if price is None:
-        price_text = "N/A"
-    else:
-        price_text = f"${price:,.2f}"
-
-    if change_pct is None:
-        change_text = "N/A"
-    else:
-        change_text = f"{change_pct:+.2f}%"
-
-    return (
-        f"{quote['symbol']}: "
-        f"{price_text} "
-        f"({change_text})"
-    )
-
-
-# ============================================================
-# BUILD MARKET DATA
-# ============================================================
-
-def build_market_data(
-    index_quotes,
-    macro_quotes,
-    watch_quotes,
-):
-
-    # --------------------------------------------------------
-    # U.S. INDICES
-    # --------------------------------------------------------
-
-    index_lines = []
-
-    for quote in index_quotes:
-        index_lines.append(fmt(quote))
-
-    index_block = "\n".join(index_lines)
-
-    # --------------------------------------------------------
-    # MACRO / GLOBAL
-    # --------------------------------------------------------
-
-    macro_lines = []
-
-    for symbol, description in MACRO_PROXIES.items():
-
-        quote = macro_quotes.get(symbol)
-
-        if quote is None:
-            continue
-
-        macro_lines.append(
-            f"{description} [{symbol}]: {fmt(quote)}"
-        )
-
-    macro_block = "\n".join(macro_lines)
-
-    # --------------------------------------------------------
-    # WATCHLIST
-    # --------------------------------------------------------
-
-    watch_lines = []
-
-    for quote in watch_quotes:
-
-        symbol = quote["symbol"]
-
-        company = WATCHLIST.get(
-            symbol,
-            symbol,
-        )
-
-        watch_lines.append(
-            f"{company} [{symbol}]: {fmt(quote)}"
-        )
-
-    watch_block = "\n".join(watch_lines)
-
-    return (
-        index_block,
-        macro_block,
-        watch_block,
-    )
-
-
-# ============================================================
-# BUILD NEWS DATA
-# ============================================================
-
-def build_news_block(news):
-
-    if not news:
-        return "Data unavailable."
-
-    lines = []
-
-    for item in news:
-
-        headline = item.get("headline", "")
-        source = item.get("source", "")
-        summary = item.get("summary", "")
-
-        if summary:
-            lines.append(
-                f"- {headline} ({source}): {summary}"
-            )
-        else:
-            lines.append(
-                f"- {headline} ({source})"
-            )
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# BUILD CLAUDE PROMPT
-# ============================================================
 
 def build_prompt(
-    mode,
-    index_quotes,
-    macro_quotes,
-    watch_quotes,
-    news,
-):
-
+    mode: str,
+    index_quotes: list[dict],
+    proxy_quotes: dict[str, dict],
+    watch_quotes: list[dict],
+    research: dict,
+) -> str:
     if mode == "premarket":
-        mode_label = (
-            "PREMARKET — before the U.S. market opens"
-        )
-
-        section_9 = (
-            "9. WHAT TO WATCH AT THE OPEN"
-        )
-
-        section_9_instruction = """
-Give me 4-6 specific things to monitor at the U.S. open.
-
-Prioritize:
-- breadth
-- small-cap confirmation
-- Treasury proxy
-- dollar
-- oil
-- major stock moves
-- relevant news
-- sector leadership
-- whether the existing market setup is confirmed or rejected
-
-For each item, explain WHY it matters.
-"""
-
+        mode_name = "Premarket — before the U.S. market opens"
+        final_heading = "9. WHAT TO WATCH AT THE OPEN"
+        final_request = "List the next developments to monitor at the open and explain why."
     else:
-        mode_label = (
-            "MARKET CLOSE — after the U.S. market has finished trading"
-        )
+        mode_name = "Market close — after the U.S. market has finished trading"
+        final_heading = "9. WHAT MATTERS FOR TOMORROW"
+        final_request = "List the next developments to monitor tomorrow and explain why."
 
-        section_9 = (
-            "9. WHAT MATTERS FOR TOMORROW"
-        )
-
-        section_9_instruction = """
-Give me 4-6 specific things to monitor tomorrow.
-
-Prioritize:
-- macro confirmation
-- market breadth
-- Treasury proxy
-- dollar
-- oil
-- important stocks
-- relevant company developments
-- sector leadership
-- risks that could change today's interpretation
-
-For each item, explain WHY it matters.
-"""
-
-    (
-        index_block,
-        macro_block,
-        watch_block,
-    ) = build_market_data(
-        index_quotes,
-        macro_quotes,
-        watch_quotes,
+    indexes = "\n".join(format_quote(item) for item in index_quotes)
+    proxies = "\n".join(
+        f"{description} [{symbol}]: {format_quote(proxy_quotes[symbol])}"
+        for symbol, description in PROXIES.items()
+        if symbol in proxy_quotes
+    )
+    watchlist = "\n".join(
+        f"{WATCHLIST.get(item['symbol'], item['symbol'])} [{item['symbol']}]: "
+        f"{format_quote(item)}"
+        for item in watch_quotes
     )
 
-    news_block = build_news_block(news)
+    return f"""You are an institutional-style equity and macro research analyst.
+Write a concise, evidence-based daily investor market brief for {mode_name}.
 
-    return f"""
-You are an institutional-style equity and macro research analyst.
+Use only the supplied data. Do not invent prices, yields, economic figures,
+company announcements, or explanations for market moves. Clearly distinguish
+facts from interpretation. Treat ETFs as proxies, not exact economic measures.
+Do not treat multiple reports about one event as independent evidence.
+Identify what happened, why it may matter financially, affected assets,
+relevant time horizon, and what to monitor next. Do not claim what "the market
+thinks" without evidence. If information is missing, say so.
 
-Produce a substantive DAILY INVESTOR MARKET BRIEF for:
-
-{mode_label}
-
-The report should be approximately 1,800-2,500 words.
-
-Do NOT try to make the report artificially short.
-
-However, do NOT ramble, repeat yourself, or produce filler.
-
-The purpose is to answer:
-
-WHAT HAPPENED?
-
-WHY DID IT HAPPEN?
-
-WHY DOES IT MATTER?
-
-WHAT SHOULD AN INVESTOR WATCH NEXT?
-
-Write for an intelligent investor who understands:
-- stocks
-- valuation
-- earnings
-- financial statements
-- basic economics
-- market terminology
-
-Use professional Wall Street language where appropriate,
-but explain important concepts clearly.
-
-============================================================
-NON-NEGOTIABLE DATA RULES
-============================================================
-
-Only use numerical facts actually supplied in the DATA section.
-
-DO NOT INVENT:
-
-- Treasury yields
-- interest rates
-- FX rates
-- economic statistics
-- inflation
-- employment data
-- analyst estimates
-- earnings estimates
-- guidance
-- company announcements
-- regulatory developments
-- hedge fund positions
-- institutional positions
-- valuation multiples
-- price targets
-- catalysts not contained in the supplied news
-
-If information is unavailable, say:
-
-"Data unavailable."
-
-Do not manufacture missing information.
-
-Distinguish FACT from INTERPRETATION.
-
-When an explanation for a stock move is not directly supported
-by the supplied news, use language such as:
-
-"may reflect"
-
-"could be related to"
-
-"one possible explanation is"
-
-Never present speculation as confirmed fact.
-
-============================================================
-IMPORTANT PROXY WARNING
-============================================================
-
-These are ETFs / MARKET PROXIES, not exact economic statistics:
-
-GLD = gold ETF
-USO = oil ETF
-TLT = long-duration U.S. Treasury ETF
-UUP = U.S. dollar ETF
-EWJ = Japan equities ETF
-MCHI = China equities ETF
-EWG = Germany equities ETF
-EWU = U.K. equities ETF
-EEM = emerging-market equities ETF
-
-Do not convert an ETF move into an exact economic statistic.
-
-For example, do NOT say:
-
-"The 10-year Treasury yield rose to 4.5%."
-
-if no Treasury yield was supplied.
-
-Instead say:
-
-"TLT declined, which can be consistent with pressure on
-long-duration Treasury prices and therefore potentially
-higher long-term rate expectations."
-
-============================================================
-EXACT REPORT STRUCTURE
-============================================================
-
-You MUST produce exactly these nine numbered sections:
+Use these exact headings and order:
 
 1. WHAT MATTERS TODAY
+Start with the executive summary: the few most important developments.
 
 2. MARKET DASHBOARD
+Summarize U.S. indices and supplied market proxies; compare leaders and laggards.
 
 3. GLOBAL MARKETS
+Explain whether international market data confirms, contradicts, or differs
+from the U.S. signal. Include relevant company/sector read-throughs only when
+supported by data.
 
 4. MACRO FACTORS
+Cover rates, dollar, commodities, inflation, employment, GDP, policy, and global
+economic developments only when the packet contains relevant evidence.
 
 5. LARGE-CAP STOCKS TO WATCH
+Discuss only watchlist companies with material news or notable supplied moves.
 
 6. SMALLER / HIGH-BETA MOVERS
+Include a signal only when supported; do not force examples.
 
 7. MACRO → STOCK CONNECTIONS
+Connect observed data to sectors and companies without overstating causation.
 
 8. INVESTOR TAKEAWAY
+Summarize the market regime, leadership, key risk, and what could change the view.
 
-{section_9}
+{final_heading}
+{final_request}
 
-DO NOT rename these headings.
+Integrate major financial events into the sections above. For each important
+event, explain the event, financial significance, affected assets/companies,
+sources, and what to watch. Synthesize differing publication perspectives when
+meaningful. Distinguish primary-source evidence from journalism. Identify only
+genuinely new information; do not repeat earlier developments as new. Include
+up to five research candidates with a question to investigate. Do not pad the
+brief to meet a target number of items.
 
-DO NOT combine sections.
+This is research, not personalized financial advice.
 
-DO NOT omit sections.
+MARKET INDICES
+{indexes}
 
-DO NOT create a separate section 10.
+MARKET AND GLOBAL PROXIES
+{proxies}
 
-============================================================
-1. WHAT MATTERS TODAY
-============================================================
+WATCHLIST QUOTES
+{watchlist}
 
-Begin with the most important conclusion.
-
-Discuss:
-
-- SPY
-- QQQ
-- DIA
-- IWM
-
-Determine:
-
-- leader
-- laggard
-- small-cap participation
-- breadth
-- concentration
-- growth vs. value implications where supported
-- cyclical vs. defensive implications where supported
-- risk-on vs. risk-off vs. rotation vs. mixed
-
-Do not simply repeat prices.
-
-Explain what the combination of moves means.
-
-============================================================
-2. MARKET DASHBOARD
-============================================================
-
-Provide a concise but analytical dashboard covering:
-
-U.S.:
-- SPY
-- QQQ
-- DIA
-- IWM
-
-Macro:
-- GLD
-- USO
-- TLT
-- UUP
-
-Global:
-- EWJ
-- MCHI
-- EWG
-- EWU
-- EEM
-
-Explain the most important relationships.
-
-Examples:
-
-TLT falling
-→ potential duration pressure
-→ possible implications for expensive growth stocks.
-
-USO rising
-→ potential energy/inflation pressure
-→ potential benefit for energy
-→ potential pressure on consumers.
-
-UUP rising
-→ potential multinational headwind
-→ potential emerging-market pressure.
-
-Only use relationships that are actually supported by the
-direction of today's data.
-
-============================================================
-3. GLOBAL MARKETS
-============================================================
-
-Analyze:
-
-- Japan
-- China
-- Europe
-- Emerging markets
-
-Explain whether international markets:
-
-1. confirm the U.S. signal
-2. contradict the U.S. signal
-3. show a separate regional story
-
-Discuss relevant read-throughs to:
-
-- TSM
-- NVDA
-- AVGO
-- AAPL
-- AMZN
-- CAT
-- XOM
-
-Explain why these relationships matter.
-
-============================================================
-4. MACRO FACTORS
-============================================================
-
-Use four subsections:
-
-INTEREST RATES
-
-DOLLAR
-
-COMMODITIES
-
-GLOBAL RISK
-
-For INTEREST RATES:
-
-Use TLT only as a proxy.
-
-Discuss implications for:
-- technology
-- growth
-- banks
-- housing
-- consumers
-- industrials
-- valuation
-
-For DOLLAR:
-
-Use UUP only as a proxy.
-
-Discuss implications for:
-- multinationals
-- emerging markets
-- commodities
-- financial conditions
-
-For COMMODITIES:
-
-Use GLD and USO.
-
-Discuss:
-- XOM
-- CAT
-- consumers
-- inflation sensitivity
-- risk appetite
-
-For GLOBAL RISK:
-
-Classify the evidence as:
-- risk-on
-- risk-off
-- rotation
-- mixed
-
-Explain why.
-
-============================================================
-5. LARGE-CAP STOCKS TO WATCH
-============================================================
-
-Watchlist:
-
-AAPL
-AMZN
-AXP
-AVGO
-CAT
-KO
-CEG
-CRWD
-LLY
-XOM
-GE
-GOOGL
-ISRG
-MSFT
-NU
-NVDA
-PLTR
-TSLA
-TSM
-COST
-V
-
-Select approximately 5-8 names.
-
-Prioritize:
-- largest moves
-- unusual moves
-- company-specific news
-- sector importance
-- macro sensitivity
-- read-through potential
-
-For every selected stock explain:
-
-1. What it is doing
-2. What appears to be driving it
-3. Whether that explanation is confirmed or speculative
-4. Why the move matters
-5. Potential read-through to other companies or sectors
-
-Do not discuss all 21 names merely for completeness.
-
-Quality is more important than quantity.
-
-============================================================
-6. SMALLER / HIGH-BETA MOVERS
-============================================================
-
-Select 2-4 interesting higher-beta names from the watchlist.
-
-Prioritize:
-- large percentage moves
-- relative strength
-- relative weakness
-- risk appetite
-- sector signals
-- unusual behavior
-
-Do not invent catalysts.
-
-If there is no convincing smaller/high-beta signal,
-say so rather than forcing one.
-
-============================================================
-7. MACRO → STOCK CONNECTIONS
-============================================================
-
-Give at least 5 meaningful connections when supported.
-
-Possible areas include:
-
-Rates → growth valuations
-
-Oil → XOM
-
-Consumer conditions → AXP / V / COST
-
-AI investment → NVDA / AVGO / TSM / MSFT / GOOGL
-
-Dollar → multinational companies
-
-Global risk → TSLA / PLTR / CRWD / NU
-
-Industrial cycle → CAT / GE
-
-Energy prices → XOM / CEG
-
-For each connection:
-
-MARKET DATA
-→ MACRO INTERPRETATION
-→ SECTOR EFFECT
-→ COMPANY EFFECT
-→ INVESTOR IMPLICATION
-
-Do not force relationships that today's data does not support.
-
-============================================================
-8. INVESTOR TAKEAWAY
-============================================================
-
-This is the most important section.
-
-Give 5-8 concise bullets answering:
-
-- What is today's market regime?
-- Who is leading?
-- Who is lagging?
-- What is the biggest macro signal?
-- What is the most important stock signal?
-- What is the biggest risk?
-- What would invalidate today's interpretation?
-- What deserves the most attention next?
-
-If I only read this section, I should understand the day's
-market.
-
-============================================================
-9. FINAL SECTION
-============================================================
-
-{section_9_instruction}
-
-These are research observations, NOT personalized financial advice.
-
-============================================================
-ANALYTICAL STANDARD
-============================================================
-
-Think like an equity research analyst.
-
-Do not merely summarize headlines.
-
-Continuously connect:
-
-MARKET MOVE
-→ MACRO
-→ SECTOR
-→ COMPANY
-→ INVESTOR IMPLICATION
-
-A strong sentence looks like:
-
-"Small caps declined alongside the major U.S. indices while
-long-duration Treasury proxies also weakened. That combination
-does not provide clean evidence of broad risk-on rotation;
-instead, it suggests a more mixed session in which equity
-weakness occurred alongside continued duration pressure."
-
-Only make conclusions supported by the supplied data.
-
-============================================================
-DATA: U.S. MARKETS
-============================================================
-
-{index_block}
-
-============================================================
-DATA: MACRO / GLOBAL PROXIES
-============================================================
-
-{macro_block}
-
-============================================================
-DATA: STOCK WATCHLIST
-============================================================
-
-{watch_block}
-
-============================================================
-DATA: RECENT MARKET NEWS
-============================================================
-
-{news_block}
-
-============================================================
-FINAL OUTPUT RULE
-============================================================
-
-Complete all nine sections.
-
-Do not stop halfway through.
-
-Do not output commentary about these instructions.
-
-Do not mention token limits.
-
-Do not say that you are unable to complete the report.
-
-Produce the actual market report.
+FINANCIAL NEWS EVENTS
+{json.dumps(research, ensure_ascii=True, indent=2)}
 """
 
 
-# ============================================================
-# EXTRACT CLAUDE TEXT
-# ============================================================
-
-def extract_claude_text(data):
-
-    blocks = data.get("content", [])
-
-    text_blocks = []
-
-    for block in blocks:
-
-        if block.get("type") != "text":
-            continue
-
-        text = str(
-            block.get("text", "")
-        ).strip()
-
-        if text:
-            text_blocks.append(text)
-
-    return "\n\n".join(text_blocks).strip()
-
-
-# ============================================================
-# CALL CLAUDE
-# ============================================================
-
-def call_claude(prompt, api_key):
-    """
-    Generate the market brief through Claude.
-
-    Designed to:
-    - Avoid deprecated Claude parameters
-    - Retry transient failures
-    - Detect truncated responses
-    - Request a substantive but bounded report
-    """
-
-    url = "https://api.anthropic.com/v1/messages"
-
+def call_claude(prompt: str, api_key: str) -> str:
     last_error = None
-
     for attempt in range(1, 4):
-
         try:
-
-            print(
-                f"Calling Claude "
-                f"(attempt {attempt}/3)..."
-            )
-
-            payload = {
-                "model": "claude-sonnet-5",
-                "max_tokens": 12000,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-            }
-
-            r = requests.post(
-                url,
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
                 headers={
                     "x-api-key": api_key,
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
                 },
-                json=payload,
-                timeout=300,
+                json={
+                    "model": MODEL,
+                    "max_tokens": 12000,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=CLAUDE_TIMEOUT,
             )
-
-            print(
-                f"Claude status: {r.status_code}"
-            )
-
-            if not r.ok:
-
-                print("Claude API error:")
-                print(r.text)
-
-                r.raise_for_status()
-
-            data = r.json()
-
-            text_blocks = []
-
-            for block in data.get("content", []):
-
-                if block.get("type") == "text":
-
-                    text = block.get(
-                        "text",
-                        ""
-                    ).strip()
-
-                    if text:
-                        text_blocks.append(text)
-
-            final_text = "\n\n".join(
-                text_blocks
+            response.raise_for_status()
+            data = response.json()
+            text = "\n\n".join(
+                block.get("text", "").strip()
+                for block in data.get("content", [])
+                if block.get("type") == "text" and block.get("text", "").strip()
             ).strip()
-
-            stop_reason = data.get(
-                "stop_reason"
-            )
-
-            print(
-                f"Claude response length: "
-                f"{len(final_text)} characters"
-            )
-
-            print(
-                f"Claude stop reason: "
-                f"{stop_reason}"
-            )
-
-            if not final_text:
-
-                raise ValueError(
-                    "Claude returned an empty response."
+            if not text:
+                raise ValueError("Claude returned an empty response.")
+            if data.get("stop_reason") == "max_tokens":
+                prompt += (
+                    "\n\nKeep the report concise and information-dense. "
+                    "Complete every required section without repetition."
                 )
-
-            # ------------------------------------------------
-            # TRUNCATION HANDLING
-            # ------------------------------------------------
-
-            if stop_reason == "max_tokens":
-
-                print(
-                    "Claude hit the output limit. "
-                    "The response was truncated."
-                )
-
-                # Do NOT send an incomplete report.
-                # Retry with a more compact instruction.
-                if attempt < 3:
-
-                    prompt = (
-                        prompt
-                        + "\n\n"
-                        + "IMPORTANT: Your previous response was "
-                        "too long. Produce the complete report "
-                        "within a strict output budget. "
-                        "Keep every required section, but make "
-                        "each section concise and information-dense. "
-                        "Do not repeat information. "
-                        "Target approximately 5,000-7,000 words maximum."
-                    )
-
-                    wait_seconds = attempt * 5
-
-                    print(
-                        f"Retrying with a tighter output "
-                        f"instruction in {wait_seconds} seconds..."
-                    )
-
-                    time.sleep(wait_seconds)
-
-                    continue
-
-                raise ValueError(
-                    "Claude repeatedly exceeded the output "
-                    "limit and produced an incomplete report."
-                )
-
-            return final_text
-
-        except Exception as e:
-
-            last_error = e
-
-            print(
-                f"Claude attempt {attempt} failed: {e}"
-            )
-
+                raise ValueError("Claude response was truncated at the token limit.")
+            return text
+        except (requests.RequestException, ValueError) as error:
+            last_error = error
+            print(f"Claude attempt {attempt}/3 failed: {error}")
             if attempt < 3:
+                time.sleep(attempt * 5)
+    raise RuntimeError(f"Claude failed after three attempts: {last_error}")
 
-                wait_seconds = attempt * 10
 
-                print(
-                    f"Waiting {wait_seconds} seconds "
-                    f"before retry..."
-                )
-
-                time.sleep(wait_seconds)
-
-    raise RuntimeError(
-        "Claude failed after 3 attempts: "
-        f"{last_error}"
+def validate_brief(text: str, mode: str) -> bool:
+    final_heading = (
+        "9. WHAT TO WATCH AT THE OPEN"
+        if mode == "premarket"
+        else "9. WHAT MATTERS FOR TOMORROW"
     )
-
-
-# ============================================================
-# VALIDATE BRIEF
-# ============================================================
-
-def validate_brief(brief_text, mode):
-
-    required_sections = [
-        "1. WHAT MATTERS TODAY",
-        "2. MARKET DASHBOARD",
-        "3. GLOBAL MARKETS",
-        "4. MACRO FACTORS",
-        "5. LARGE-CAP STOCKS TO WATCH",
-        "6. SMALLER / HIGH-BETA MOVERS",
-        "7. MACRO → STOCK CONNECTIONS",
-        "8. INVESTOR TAKEAWAY",
+    missing = [
+        heading for heading in REQUIRED_SECTIONS + [final_heading]
+        if heading.casefold() not in text.casefold()
     ]
-
-    if mode == "premarket":
-        final_heading = (
-            "9. WHAT TO WATCH AT THE OPEN"
-        )
-    else:
-        final_heading = (
-            "9. WHAT MATTERS FOR TOMORROW"
-        )
-
-    missing = []
-
-    normalized = brief_text.upper()
-
-    for section in required_sections:
-
-        if section.upper() not in normalized:
-            missing.append(section)
-
-    if final_heading.upper() not in normalized:
-        missing.append(final_heading)
-
     if missing:
-        print(
-            "Brief validation failed."
-        )
-
-        print(
-            "Missing sections:"
-        )
-
-        for item in missing:
-            print(f"  - {item}")
-
+        print("Brief is missing required headings: " + ", ".join(missing))
         return False
-
-    print(
-        "Brief validation passed: "
-        "all 9 sections detected."
-    )
-
     return True
 
 
-# ============================================================
-# REPAIR INCOMPLETE BRIEF
-# ============================================================
+def display_report(text: str) -> None:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    printable = text.encode(encoding, errors="replace").decode(encoding)
+    print(printable)
 
-def repair_brief(
-    brief_text,
-    mode,
-    api_key,
-):
 
-    if mode == "premarket":
-        final_heading = (
-            "9. WHAT TO WATCH AT THE OPEN"
-        )
-    else:
-        final_heading = (
-            "9. WHAT MATTERS FOR TOMORROW"
-        )
-
-    print(
-        "Attempting one report-repair pass..."
+def repair_brief(text: str, mode: str, api_key: str) -> str:
+    final_heading = (
+        "9. WHAT TO WATCH AT THE OPEN"
+        if mode == "premarket"
+        else "9. WHAT MATTERS FOR TOMORROW"
     )
-
-    prompt = f"""
-You are repairing an incomplete institutional market report.
-
-Below is a report that was generated but failed structural
-validation.
-
-DO NOT rewrite sections that are already present.
-
-DO NOT invent new market facts.
-
-Preserve all existing factual statements.
-
-Your job is to produce a final complete report containing
-all nine required sections.
-
-Required headings:
-
-1. WHAT MATTERS TODAY
-2. MARKET DASHBOARD
-3. GLOBAL MARKETS
-4. MACRO FACTORS
-5. LARGE-CAP STOCKS TO WATCH
-6. SMALLER / HIGH-BETA MOVERS
-7. MACRO → STOCK CONNECTIONS
-8. INVESTOR TAKEAWAY
+    prompt = f"""Complete the report below without changing supported facts or
+inventing information. Preserve its content and add any missing sections:
+{chr(10).join(REQUIRED_SECTIONS)}
 {final_heading}
+Return only the complete report. Write "Data unavailable" where necessary.
 
-If a section is genuinely unsupported by the supplied data,
-write "Data unavailable" rather than inventing information.
-
-Return ONLY the repaired report.
-
-REPORT TO REPAIR:
-
-{brief_text}
+REPORT:
+{text}
 """
-
-    repaired = call_claude(
-        prompt,
-        api_key,
-    )
-
-    return repaired
+    return call_claude(prompt, api_key)
 
 
-# ============================================================
-# GMAIL SMTP
-# ============================================================
-
-def send_email(
-    subject,
-    body_text,
-    to_addr,
-):
-
-    gmail_address = require_env(
-        "GMAIL_ADDRESS"
-    )
-
-    gmail_app_password = require_env(
-        "GMAIL_APP_PASSWORD"
-    )
-
-    if not body_text.strip():
-        raise ValueError(
-            "Refusing to send an empty email."
-        )
-
-    print(
-        f"Email body length: "
-        f"{len(body_text)} characters"
-    )
-
-    message = MIMEText(
-        body_text,
-        "plain",
-        "utf-8",
-    )
-
-    message["From"] = gmail_address
-    message["To"] = to_addr
+def send_email(subject: str, body: str, recipient: str) -> None:
+    if not body.strip():
+        raise ValueError("Refusing to send an empty email.")
+    sender = require_env("GMAIL_ADDRESS")
+    password = require_env("GMAIL_APP_PASSWORD")
+    message = MIMEText(body, "plain", "utf-8")
+    message["From"] = sender
+    message["To"] = recipient
     message["Subject"] = subject
 
     last_error = None
-
     for attempt in range(1, 4):
-
         try:
-
-            print(
-                f"Sending email "
-                f"(attempt {attempt}/3)..."
-            )
-
-            with smtplib.SMTP(
-                "smtp.gmail.com",
-                587,
-                timeout=SMTP_TIMEOUT,
-            ) as server:
-
-                server.ehlo()
-
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
                 server.starttls()
-
-                server.ehlo()
-
-                server.login(
-                    gmail_address,
-                    gmail_app_password,
-                )
-
-                server.sendmail(
-                    gmail_address,
-                    [to_addr],
-                    message.as_string(),
-                )
-
-            print(
-                "Email sent successfully."
-            )
-
+                server.login(sender, password)
+                server.sendmail(sender, [recipient], message.as_string())
+            print(f"Brief emailed to {recipient}.")
             return
-
-        except Exception as exc:
-
-            last_error = exc
-
-            print(
-                f"Email attempt {attempt} failed: "
-                f"{exc}"
-            )
-
+        except Exception as error:
+            last_error = error
+            print(f"Email attempt {attempt}/3 failed: {error}")
             if attempt < 3:
-
-                wait_seconds = attempt * 10
-
-                print(
-                    f"Waiting {wait_seconds} seconds "
-                    f"before retry..."
-                )
-
-                time.sleep(wait_seconds)
-
-    raise RuntimeError(
-        "Gmail failed after 3 attempts: "
-        f"{last_error}"
-    )
+                time.sleep(attempt * 5)
+    raise RuntimeError(f"Email delivery failed after three attempts: {last_error}")
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    # --------------------------------------------------------
-    # MODE
-    # --------------------------------------------------------
-
-    mode = (
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else "premarket"
-    )
-
-    if mode not in (
-        "premarket",
-        "close",
-    ):
-
-        print(
-            "Usage: python main.py "
-            "[premarket|close]"
-        )
-
-        sys.exit(1)
-
-    print("")
-    print("=" * 70)
-
-    if mode == "premarket":
-
-        print(
-            "RUNNING PREMARKET MARKET BRIEF"
-        )
-
-    else:
-
-        print(
-            "RUNNING MARKET CLOSE BRIEF"
-        )
-
-    print("=" * 70)
-    print("")
-
-    # --------------------------------------------------------
-    # API KEYS
-    # --------------------------------------------------------
-
-    finnhub_key = require_env(
-        "FINNHUB_API_KEY"
-    )
-
-    anthropic_key = require_env(
-        "ANTHROPIC_API_KEY"
-    )
-
-    email_to = require_env(
-        "EMAIL_TO"
-    )
-
-    # --------------------------------------------------------
-    # WATCHLIST
-    # --------------------------------------------------------
-
-    watchlist = get_watchlist()
-
-    print(
-        f"Tracking {len(watchlist)} stocks."
-    )
-
-    # --------------------------------------------------------
-    # ALL SYMBOLS
-    # --------------------------------------------------------
-
-    all_symbols = (
-        INDEX_SYMS
-        + list(MACRO_PROXIES.keys())
-        + watchlist
-    )
-
-    all_symbols = list(
-        dict.fromkeys(all_symbols)
-    )
-
-    # --------------------------------------------------------
-    # FETCH QUOTES
-    # --------------------------------------------------------
+def run(mode: str) -> None:
+    finnhub_key = require_env("FINNHUB_API_KEY")
+    anthropic_key = require_env("ANTHROPIC_API_KEY")
+    recipient = require_env("EMAIL_TO")
+    watchlist_names = get_watchlist()
+    symbols = list(dict.fromkeys(INDICES + list(PROXIES) + list(watchlist_names)))
 
     quotes = {}
-
-    print("")
-    print(
-        "Fetching market data..."
-    )
-
-    for symbol in all_symbols:
-
+    for symbol in symbols:
         try:
-
-            quotes[symbol] = fetch_quote(
-                symbol,
-                finnhub_key,
-            )
-
-            print(
-                f"{symbol}: "
-                f"{fmt(quotes[symbol])}"
-            )
-
-        except Exception as exc:
-
-            # One bad symbol should NEVER kill the entire report.
-            print(
-                f"Quote failed for {symbol}: "
-                f"{exc}"
-            )
-
+            quotes[symbol] = fetch_quote(symbol, finnhub_key)
+            print(format_quote(quotes[symbol]))
+        except Exception as error:
+            print(f"Quote unavailable ({symbol}): {error}")
             quotes[symbol] = {
                 "symbol": symbol,
                 "price": None,
@@ -1547,198 +381,80 @@ def main():
                 "previous_close": None,
             }
 
-    # --------------------------------------------------------
-    # FETCH NEWS
-    # --------------------------------------------------------
+    finnhub_failed = False
+    try:
+        finnhub_items = fetch_finnhub_news(finnhub_key)
+    except Exception as error:
+        print(f"Finnhub news unavailable: {error}")
+        finnhub_items = []
 
-    print("")
-    print(
-        "Fetching market news..."
-    )
+        finnhub_failed = True
 
     try:
-
-        news = fetch_news(
-            finnhub_key,
-            limit=NEWS_LIMIT,
-        )
-
-        print(
-            f"Retrieved {len(news)} news items."
-        )
-
-    except Exception as exc:
-
-        print(
-            f"News fetch failed: {exc}"
-        )
-
-        # News failure should NOT kill the market brief.
-        news = []
-
-    # --------------------------------------------------------
-    # ORGANIZE DATA
-    # --------------------------------------------------------
-
-    index_quotes = [
-        quotes[symbol]
-        for symbol in INDEX_SYMS
+        external_items, failures = fetch_configured_news(watchlist_names)
+    except Exception as error:
+        print(f"External news configuration unavailable: {error}")
+        external_items, failures = [], ["configured external sources"]
+    if finnhub_failed:
+        failures.append("Finnhub")
+    normalized_finnhub = [
+        article for item in finnhub_items
+        if (article := normalize_article(item, "Finnhub", watchlist_names))
     ]
-
-    macro_quotes = {
-        symbol: quotes.get(symbol)
-        for symbol in MACRO_PROXIES
-    }
-
-    watch_quotes = [
-        quotes[symbol]
-        for symbol in watchlist
-    ]
-
-    # --------------------------------------------------------
-    # BUILD PROMPT
-    # --------------------------------------------------------
-
-    print("")
-    print(
-        "Building analyst prompt..."
+    research = build_research_packet(
+        normalized_finnhub + external_items,
+        failures,
     )
+
+    event_list = research["events"]
+    print(f"Finnhub articles retrieved: {len(normalized_finnhub)}")
+    print(f"External articles retrieved: {len(external_items)}")
+    primary_count = sum(
+        item["source"] in {"Federal Reserve", "U.S. Treasury", "BLS", "BEA", "SEC"}
+        for item in external_items
+    )
+    print(f"Primary-source items retrieved: {primary_count}")
+    print(f"Articles after filtering: {sum(len(event['articles']) for event in event_list)}")
+    print(f"Events after deduplication: {len(event_list)}")
+    print(f"Watchlist-related events: {sum(bool(event['watchlist_tickers']) for event in event_list)}")
+    if failures:
+        print("Unavailable sources: " + ", ".join(failures))
 
     prompt = build_prompt(
         mode,
-        index_quotes,
-        macro_quotes,
-        watch_quotes,
-        news,
+        [quotes[symbol] for symbol in INDICES],
+        {symbol: quotes[symbol] for symbol in PROXIES},
+        [quotes[symbol] for symbol in watchlist_names],
+        research,
     )
+    print(f"Claude input size: {len(prompt)} characters")
+    brief = call_claude(prompt, anthropic_key)
+    if not validate_brief(brief, mode):
+        brief = repair_brief(brief, mode, anthropic_key)
+    if not validate_brief(brief, mode):
+        raise RuntimeError("Claude returned an incomplete brief; email was not sent.")
 
-    print(
-        f"Prompt length: "
-        f"{len(prompt)} characters"
+    display_report(brief)
+    local_now = datetime.now(ZoneInfo("America/New_York"))
+    date = local_now.strftime("%a %b %d, %Y")
+    subject = (
+        f"Premarket Market Brief — {date}"
+        if mode == "premarket"
+        else f"Market Close Recap — {date}"
     )
+    send_email(subject, brief, recipient)
 
-    # --------------------------------------------------------
-    # CALL CLAUDE
-    # --------------------------------------------------------
 
-    print("")
-    print(
-        "Generating market brief..."
+def main() -> None:
+    invalid_args = len(sys.argv) > 2 or (
+        len(sys.argv) == 2 and sys.argv[1] not in {"premarket", "close"}
     )
+    if invalid_args:
+        raise SystemExit("Usage: python main.py [premarket|close]")
+    mode = sys.argv[1] if len(sys.argv) == 2 else "premarket"
+    print(f"Running {mode} market brief.")
+    run(mode)
 
-    brief_text = call_claude(
-        prompt,
-        anthropic_key,
-    )
-
-    # --------------------------------------------------------
-    # VALIDATE
-    # --------------------------------------------------------
-
-    valid = validate_brief(
-        brief_text,
-        mode,
-    )
-
-    # --------------------------------------------------------
-    # REPAIR ONCE IF NECESSARY
-    # --------------------------------------------------------
-
-    if not valid:
-
-        brief_text = repair_brief(
-            brief_text,
-            mode,
-            anthropic_key,
-        )
-
-        valid = validate_brief(
-            brief_text,
-            mode,
-        )
-
-    # --------------------------------------------------------
-    # FAIL SAFE
-    # --------------------------------------------------------
-
-    if not valid:
-
-        raise RuntimeError(
-            "Claude produced an incomplete market brief "
-            "after generation and repair attempts. "
-            "Email was NOT sent."
-        )
-
-    # --------------------------------------------------------
-    # PRINT REPORT
-    # --------------------------------------------------------
-
-    print("")
-    print("=" * 70)
-    print(
-        "CLAUDE MARKET BRIEF"
-    )
-    print("=" * 70)
-
-    print(brief_text)
-
-    print("=" * 70)
-    print("")
-
-    # --------------------------------------------------------
-    # DATE
-    # --------------------------------------------------------
-
-    today = (
-        datetime.now(
-            timezone.utc
-        )
-        .astimezone()
-        .strftime("%a %b %d, %Y")
-    )
-
-    # --------------------------------------------------------
-    # SUBJECT
-    # --------------------------------------------------------
-
-    if mode == "premarket":
-
-        subject = (
-            f"Premarket Market Brief — {today}"
-        )
-
-    else:
-
-        subject = (
-            f"Market Close Recap — {today}"
-        )
-
-    # --------------------------------------------------------
-    # SEND EMAIL
-    # --------------------------------------------------------
-
-    send_email(
-        subject,
-        brief_text,
-        email_to,
-    )
-
-    # --------------------------------------------------------
-    # SUCCESS
-    # --------------------------------------------------------
-
-    print("")
-    print("=" * 70)
-    print(
-        f"SUCCESS: Market brief sent to "
-        f"{email_to}"
-    )
-    print("=" * 70)
-
-
-# ============================================================
-# RUN
-# ============================================================
 
 if __name__ == "__main__":
     main()
